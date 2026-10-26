@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Bus dei messaggi: l'unico pezzo del motore che fa rispettare il grafo di accesso.
+
+    bus send <destinatario> [testo...]   consegna un messaggio; senza testo lo legge da stdin
+    bus recv [--attesa <secondi>]        aspetta bloccato il primo messaggio della propria casella
+    bus vista                            stampa la propria vista del grafo, con la versione corrente
+
+Nessun comando accetta il mittente. Il bus lo ricava dalla discendenza dei processi: risale
+/proc dal proprio padre e il primo antenato che una partita aperta ha registrato in nodi.json
+— coppia (pid, starttime), scritta dalla regia al lancio — è il chiamante. Un chiamante che
+nessuna partita aperta ha registrato viene rifiutato con `mittente-ignoto`.
+
+Ogni invio, consegnato o rifiutato, e ogni lettura diventano una riga di registro/messaggi.jsonl.
+Il rifiuto per arco mancante porta il motivo `arco-negato`.
+
+Esce 0 se consegna o legge, 1 se rifiuta, 2 su uso sbagliato, 3 se recv non riceve niente
+entro l'attesa.
+"""
+
+import fcntl
+import json
+import os
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import grafo as libgrafo  # noqa: E402
+import vista as libvista  # noqa: E402
+
+RADICE = libgrafo.radice_orchestra()
+PARTITE = RADICE / "partite"
+LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
+LOCK_MESSAGGI = RADICE / "registro" / ".messaggi.lock"
+ATTESA_REGISTRAZIONE_S = 20
+ATTESA_RECV_DEFAULT_S = 600
+ATTESA_RECV_MASSIMA_S = 840
+PASSO_POLLING_S = 0.5
+
+
+class Rifiuto(Exception):
+    def __init__(self, motivo, dettaglio):
+        super().__init__(dettaglio)
+        self.motivo = motivo
+        self.dettaglio = dettaglio
+
+
+# <editor-fold defaultstate="collapsed" desc="Identità dalla discendenza dei processi">
+def campi_stat(pid):
+    """I campi di /proc/<pid>/stat dal terzo in poi: il nome del comando può contenere spazi e parentesi."""
+    with open(f"/proc/{pid}/stat", encoding="utf-8") as file_stat:
+        contenuto = file_stat.read()
+    return contenuto[contenuto.rindex(")") + 2:].split()
+
+
+def padre_e_avvio(pid):
+    campi = campi_stat(pid)
+    return int(campi[1]), int(campi[19])
+
+
+def antenati():
+    """Coppie (pid, starttime) dal padre del bus fino a init, escluso."""
+    catena = []
+    pid = os.getppid()
+    while pid > 1:
+        try:
+            padre, avvio = padre_e_avvio(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        catena.append((pid, avvio))
+        pid = padre
+    return catena
+
+
+def e_sessione_claude(pid):
+    try:
+        eseguibile = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return False
+    return "/claude/" in eseguibile or Path(eseguibile).name == "claude"
+
+
+def registrazioni_aperte():
+    """(pid, starttime) → (cartella della partita, nodo), per ogni partita aperta."""
+    registrazioni = {}
+    if not PARTITE.is_dir():
+        return registrazioni
+    for file_nodi in PARTITE.glob("*/nodi.json"):
+        try:
+            dati = json.loads(file_nodi.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if dati.get("stato") != "aperta":
+            continue
+        for id_nodo, processo in dati.get("nodi", {}).items():
+            if processo.get("pid") and processo.get("starttime"):
+                registrazioni[(processo["pid"], processo["starttime"])] = (file_nodi.parent, id_nodo)
+    return registrazioni
+
+
+def identifica():
+    """Il chiamante come (cartella della partita, nodo). Aspetta la registrazione fino a 20 s,
+    perché la regia registra un nodo solo dopo che il suo processo è partito."""
+    catena = antenati()
+    scadenza = time.monotonic() + ATTESA_REGISTRAZIONE_S
+    while True:
+        registrazioni = registrazioni_aperte()
+        for coppia in catena:
+            if coppia in registrazioni:
+                return registrazioni[coppia]
+        if time.monotonic() >= scadenza:
+            break
+        time.sleep(PASSO_POLLING_S)
+    sessioni = [pid for pid, _ in catena if e_sessione_claude(pid)]
+    chi = f"sessione claude pid {sessioni[0]}" if sessioni else f"processo pid {os.getppid()}"
+    raise Rifiuto("mittente-ignoto", f"{chi} non è registrata in nessuna partita aperta")
+# </editor-fold>
+
+
+# <editor-fold defaultstate="collapsed" desc="Log dei messaggi e caselle">
+def adesso():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+
+
+def scrivi_log(riga):
+    LOG_MESSAGGI.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK_MESSAGGI, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(LOG_MESSAGGI, "a", encoding="utf-8") as log:
+            log.write(json.dumps(riga, ensure_ascii=False) + "\n")
+
+
+def casella(cartella_partita, id_nodo):
+    return cartella_partita / "caselle" / id_nodo
+
+
+def deposita(cartella_partita, messaggio):
+    cartella = casella(cartella_partita, messaggio["a"])
+    cartella.mkdir(parents=True, exist_ok=True)
+    nome = f"{time.time_ns()}-{messaggio['id']}.json"
+    temporaneo = cartella / f".{nome}"
+    temporaneo.write_text(json.dumps(messaggio, ensure_ascii=False), encoding="utf-8")
+    os.rename(temporaneo, cartella / nome)
+
+
+def preleva(cartella_partita, id_nodo):
+    """Il messaggio più vecchio della casella, spostato in letti/; None se la casella è vuota."""
+    cartella = casella(cartella_partita, id_nodo)
+    letti = cartella / "letti"
+    letti.mkdir(parents=True, exist_ok=True)
+    for file_messaggio in sorted(cartella.glob("[0-9]*.json")):
+        try:
+            os.rename(file_messaggio, letti / file_messaggio.name)
+        except FileNotFoundError:
+            continue
+        return json.loads((letti / file_messaggio.name).read_text(encoding="utf-8"))
+    return None
+# </editor-fold>
+
+
+def riga_rifiuto(rifiuto, partita, mittente, destinatario, versione, testo):
+    return {
+        "ts": adesso(), "partita": partita, "id": None, "esito": "rifiutato", "motivo": rifiuto.motivo,
+        "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
+        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+    }
+
+
+def comando_send(argomenti):
+    if not argomenti:
+        print("uso: bus send <destinatario> [testo...]", file=sys.stderr)
+        return 2
+    destinatario = argomenti[0]
+    testo = " ".join(argomenti[1:]) if len(argomenti) > 1 else sys.stdin.read()
+    testo = testo.strip()
+    if not testo:
+        print("testo vuoto: niente da consegnare", file=sys.stderr)
+        return 2
+    partita, mittente, versione = None, None, None
+    try:
+        cartella_partita, mittente = identifica()
+        partita = cartella_partita.name
+        grafo = libgrafo.carica(cartella_partita / "grafo.json")
+        versione = grafo["versione"]
+        if libgrafo.nodo(grafo, destinatario) is None:
+            raise Rifiuto("nodo-ignoto", f"{destinatario} non è un nodo del grafo v{versione}")
+        if "scrive" not in libgrafo.diritti(grafo, mittente, destinatario):
+            raise Rifiuto("arco-negato", f"{mittente} non ha `scrive` verso {destinatario} nel grafo v{versione}")
+    except Rifiuto as rifiuto:
+        scrivi_log(riga_rifiuto(rifiuto, partita, mittente, destinatario, versione, testo))
+        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+        return 1
+    messaggio = {
+        "ts": adesso(), "partita": partita, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "consegnato",
+        "motivo": None, "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
+        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+    }
+    deposita(cartella_partita, messaggio)
+    scrivi_log(messaggio)
+    print(f"consegnato a {destinatario} · messaggio {messaggio['id']} · grafo v{versione}")
+    return 0
+
+
+def comando_recv(argomenti):
+    attesa = ATTESA_RECV_DEFAULT_S
+    if argomenti[:1] == ["--attesa"] and len(argomenti) == 2 and argomenti[1].isdigit():
+        attesa = min(int(argomenti[1]), ATTESA_RECV_MASSIMA_S)
+    elif argomenti:
+        print("uso: bus recv [--attesa <secondi>]", file=sys.stderr)
+        return 2
+    try:
+        cartella_partita, destinatario = identifica()
+    except Rifiuto as rifiuto:
+        scrivi_log(riga_rifiuto(rifiuto, None, None, None, None, ""))
+        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+        return 1
+    scadenza = time.monotonic() + attesa
+    while True:
+        messaggio = preleva(cartella_partita, destinatario)
+        if messaggio is not None:
+            break
+        if time.monotonic() >= scadenza:
+            print(f"nessun messaggio entro {attesa} s: richiama bus recv per continuare ad aspettare")
+            return 3
+        time.sleep(PASSO_POLLING_S)
+    scrivi_log({
+        "ts": adesso(), "partita": cartella_partita.name, "id": messaggio["id"], "esito": "letto",
+        "motivo": None, "da": messaggio["da"], "a": destinatario, "versione": messaggio["versione"],
+        "testo": None, "parole": messaggio["parole"], "pid_chiamante": os.getppid(),
+    })
+    print(f"messaggio {messaggio['id']} da {messaggio['da']} · grafo v{messaggio['versione']}")
+    print("---")
+    print(messaggio["testo"])
+    return 0
+
+
+def comando_vista(argomenti):
+    if argomenti:
+        print("uso: bus vista", file=sys.stderr)
+        return 2
+    try:
+        cartella_partita, id_nodo = identifica()
+    except Rifiuto as rifiuto:
+        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+        return 1
+    grafo = libgrafo.carica(cartella_partita / "grafo.json")
+    print(libvista.come_testo(libvista.vista(grafo, id_nodo)))
+    return 0
+
+
+def main():
+    comandi = {"send": comando_send, "recv": comando_recv, "vista": comando_vista}
+    if len(sys.argv) < 2 or sys.argv[1] not in comandi:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return comandi[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -23,6 +23,11 @@ Il motore minimo dell'orchestrazione agentica: sessioni che si parlano lungo un 
 | `schema/` | schema del grafo |
 | `test/contro-prove.sh` | contro-prove deterministiche di validatore, vista e bus, su una copia isolata del motore |
 
+## Collaudo
+
+- `test/contro-prove.sh` — senza LLM, su una copia del motore in una cartella temporanea: il registro vero non riceve righe
+- `bin/regia.py contro-prova` — un nodo LLM vero prova a scrivere fuori dal grafo, a dichiararsi un altro nodo e a leggere le caselle con `ls`; la regia verifica log e transcript e scrive `contro-prova.md` nella partita. Una partita `*-contro-prova-*` è un collaudo del motore, non un gioco: non ha riga nel registro delle partite, e le sue righe nel log dei messaggi — `arco-negato` compreso — si riconoscono dall'id della partita
+
 ## Il nodo
 
 Un nodo LLM è una sessione Claude Code lanciata dalla regia con `claude --bg --safe-mode --tools Bash --allowedTools "Bash(<orchestra>/bin/bus *)" --permission-mode dontAsk`, nella propria cartella `partite/<partita>/nodi/<nodo>/`:
