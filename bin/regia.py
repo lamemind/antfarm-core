@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Regia del motore: uno script, non un LLM. Prepara la partita, lancia i nodi, chiude.
 
+    orchestra/bin/regia.py telefono --regola copia|riformula [--seme <n>] [--modello <m>]
+    orchestra/bin/regia.py telefono --a-secco [--seme <n>]
+        telefono senza fili: valida il grafo, genera i dieci fatti dal seme, lancia A, B, C, D,
+        invia il messaggio di partenza ad A, aspetta l'arrivo da D, chiama l'oracolo, osserva le
+        sessioni, scrive la riga nel registro delle partite e chiude. Scrive nella cartella della
+        partita fatti.json, oracolo.json, osservazione.json. Esce 0 se la partita arriva in fondo
+        con i controlli di osservabilità passati e 0 turni umani, e — con `copia` — 10/10.
+        `--a-secco` usa nodi script che inoltrano identico al posto delle sessioni: collauda
+        regia, bus e oracolo senza LLM, e non scrive nel registro delle partite.
+
     orchestra/bin/regia.py contro-prova [--modello <m>]
         partita di prova del bus con un nodo LLM vero: A prova a scrivere a D, poi scrive a B
         dichiarandosi C, poi prova a leggere le caselle con `ls`. Verifica nel log dei messaggi e
@@ -19,14 +29,22 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "giochi" / "telefono"))
+import fatti as libfatti  # noqa: E402
+import gioco as telefono_gioco  # noqa: E402
 import grafo as libgrafo  # noqa: E402
+import osserva as libosserva  # noqa: E402
 import partita as libpartita  # noqa: E402
+import vista as libvista  # noqa: E402
 
 RADICE = libgrafo.radice_orchestra()
 VALIDATORE = RADICE / "bin" / "valida-grafo.py"
 LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
 GRAFO_TELEFONO = RADICE / "giochi" / "telefono" / "grafo.json"
+NODO_INOLTRO = RADICE / "giochi" / "telefono" / "nodo-inoltro.py"
 SCADENZA_NODO_S = 600
+SCADENZA_PARTITA_S = 1800
+SCADENZA_CHIUSURA_NODI_S = 300
 
 
 def valida(percorso_grafo):
@@ -125,12 +143,90 @@ def contro_prova(argomenti):
 # </editor-fold>
 
 
+# <editor-fold defaultstate="collapsed" desc="telefono senza fili">
+def scrivi_json(percorso, dati):
+    percorso.write_text(json.dumps(dati, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def telefono(argomenti):
+    valida(GRAFO_TELEFONO)
+    regola = "copia" if argomenti.a_secco else argomenti.regola
+    fatti = libfatti.genera(argomenti.seme)
+    partenza = libfatti.messaggio_di_partenza(fatti)
+    tetto = telefono_gioco.tetto_parole(partenza) if regola == "riformula" else None
+    variante = "a-secco" if argomenti.a_secco else regola
+    partita = libpartita.Partita.crea(f"telefono-{variante}", "telefono", GRAFO_TELEFONO, {
+        "regola": regola, "a_secco": argomenti.a_secco, "seme": argomenti.seme,
+        "modello": argomenti.modello or "default", "parole_partenza": len(partenza.split()), "tetto_parole": tetto,
+    })
+    scrivi_json(partita.cartella / "fatti.json", {"seme": argomenti.seme, "fatti": fatti, "messaggio_di_partenza": partenza})
+    grafo = partita.grafo()
+    processi_script = []
+    for nodo in telefono_gioco.NODI:
+        successore = telefono_gioco.SUCCESSORE[nodo]
+        compito = f"telefono senza fili, regola {regola}: ricevere un messaggio e consegnarlo a {successore}"
+        if argomenti.a_secco:
+            processi_script.append(partita.lancia_nodo_script(nodo, [sys.executable, NODO_INOLTRO, successore], compito))
+        else:
+            vista = libvista.come_testo(libvista.vista(grafo, nodo))
+            prompt = telefono_gioco.prompt_nodo(nodo, vista, libpartita.BUS, regola, tetto)
+            dati = partita.lancia_nodo(nodo, prompt, compito, argomenti.modello)
+            print(f"{nodo}: sessione {dati['sessionId']} · pid {dati['pid']} · claude attach {dati['short_id']}")
+    print(f"partita {partita.id}: nodi lanciati, messaggio di partenza ad A ({len(partenza.split())} parole)")
+    invio = libpartita.invia(partenza, "A")
+    if invio.returncode != 0:
+        partita.ferma_nodi()
+        partita.chiudi("partenza rifiutata")
+        raise SystemExit(f"il bus ha rifiutato il messaggio di partenza: {invio.stderr}")
+    arrivo = libpartita.ricevi(SCADENZA_PARTITA_S)
+    print(f"arrivo: {'da ' + arrivo[0] + ' · ' + arrivo[1] if arrivo else 'nessuno entro la scadenza'}")
+    for processo in processi_script:
+        processo.wait(timeout=60)
+    rimasti = partita.attendi_fine_nodi(SCADENZA_CHIUSURA_NODI_S)
+    partita.ferma_nodi()
+
+    esito_oracolo = telefono_gioco.oracolo(righe_log(partita.id), fatti, tetto)
+    esito_oracolo["arrivo_da"] = arrivo[0] if arrivo else None
+    esito_oracolo["nodi_ancora_al_lavoro"] = rimasti
+    scrivi_json(partita.cartella / "oracolo.json", esito_oracolo)
+    riuscita = esito_oracolo["esito"].endswith(f"/{len(fatti)}") and arrivo is not None and arrivo[0] == "D"
+    if regola == "copia":
+        riuscita = riuscita and esito_oracolo["intatti_all_arrivo"] == len(fatti)
+    if not argomenti.a_secco:
+        osservazione = libosserva.osserva(partita.cartella)
+        scrivi_json(partita.cartella / "osservazione.json", osservazione)
+        libosserva.registra_partita({
+            "partita": partita.id, "gioco": "telefono", "esito": esito_oracolo["esito"],
+            "turni_umani": osservazione["turni_umani"], "token": osservazione["token"], "cwd": partita.cartella,
+        })
+        riuscita = riuscita and osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
+        print(libosserva.come_testo(osservazione))
+    partita.chiudi(esito_oracolo["esito"])
+    for salto in esito_oracolo["salti"]:
+        if salto.get("mancante"):
+            print(f"  {salto['da']} → {salto['a']}: nessun messaggio consegnato")
+        else:
+            print(f"  {salto['da']} → {salto['a']}: {salto['intatti']}/{len(fatti)} numeri · {salto['parole']} parole"
+                  f"{' · persi ' + str(salto['persi']) if salto['persi'] else ''}")
+    print(f"esito dell'oracolo: {esito_oracolo['esito']} · partita {'riuscita' if riuscita else 'NON riuscita'}")
+    return 0 if riuscita else 1
+# </editor-fold>
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sotto = parser.add_subparsers(dest="comando", required=True)
+    gioco = sotto.add_parser("telefono")
+    modo = gioco.add_mutually_exclusive_group(required=True)
+    modo.add_argument("--regola", choices=sorted(telefono_gioco.REGOLE))
+    modo.add_argument("--a-secco", action="store_true")
+    gioco.add_argument("--seme", type=int, default=42)
+    gioco.add_argument("--modello")
     prova = sotto.add_parser("contro-prova")
     prova.add_argument("--modello")
     argomenti = parser.parse_args()
+    if argomenti.comando == "telefono":
+        return telefono(argomenti)
     if argomenti.comando == "contro-prova":
         return contro_prova(argomenti)
     return 2

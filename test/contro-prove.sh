@@ -101,6 +101,28 @@ sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 come_nodo A "$BUS" send B "a partita chiusa"
 verifica "partita chiusa: anche un nodo registrato è rifiutato" test $? -ne 0
 
+echo "oracolo del telefono"
+ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import fatti, gioco
+lista = fatti.genera(42)
+partenza = fatti.messaggio_di_partenza(lista)
+primo, secondo = lista[0]["numero"], lista[1]["numero"]
+perdente = partenza.replace(str(primo), f"{primo // 100}.{primo % 100:02d}").replace(str(secondo), "molti")
+righe = [{"esito": "consegnato", "da": da, "a": a, "id": f"m-{indice}", "parole": len(testo.split()), "testo": testo}
+         for indice, (da, a, testo) in enumerate([("regia", "A", partenza), ("A", "B", partenza),
+                                                 ("B", "C", perdente), ("C", "D", perdente), ("D", "regia", perdente)])]
+completo = gioco.oracolo(righe, lista)
+interrotto = gioco.oracolo(righe[:3], lista)
+print(json.dumps({"esito": completo["esito"], "persi_bc": completo["salti"][2]["persi"], "attesi": [primo, secondo],
+                  "interrotto": interrotto["esito"]}))
+PY
+)
+verifica "due numeri persi fra B e C → 8/10" jq -e '.esito == "8/10"' <<< "$ORACOLO"
+verifica "i persi sono attribuiti al salto B → C, cifra riformattata compresa" jq -e '.persi_bc == .attesi' <<< "$ORACOLO"
+verifica "catena senza C → D: esito interrotta" jq -e '.interrotto == "interrotta C→D"' <<< "$ORACOLO"
+
 echo
 if [[ $fallite -gt 0 ]]; then
   echo "CONTRO-PROVE FALLITE: $fallite"

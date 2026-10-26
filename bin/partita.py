@@ -147,6 +147,29 @@ class Partita:
         self.registra(id_nodo, dati)
         return dati
 
+    def lancia_nodo_script(self, id_nodo, comando, compito):
+        """Processo locale figlio della regia. Parte bloccato su stdin e la regia lo sblocca solo
+        dopo averlo registrato: prima, il bus troverebbe la regia fra i suoi antenati e lo
+        scambierebbe per lei."""
+        cwd = self.cartella / "nodi" / id_nodo
+        cwd.mkdir(parents=True)
+        uscita = open(self.cartella / f"uscita-{id_nodo}.txt", "w", encoding="utf-8")
+        processo = subprocess.Popen(comando, cwd=cwd, stdin=subprocess.PIPE, stdout=uscita,
+                                    stderr=subprocess.STDOUT, text=True)
+        self.registra(id_nodo, {
+            "tipo": "script",
+            "pid": processo.pid,
+            "starttime": avvio_processo(processo.pid),
+            "cwd": str(cwd),
+            "genitore": {"nodo": "regia", "pid": os.getpid()},
+            "compito": compito,
+            "lanciato": adesso(),
+            "comando": [str(parte) for parte in comando],
+        })
+        processo.stdin.write("via\n")
+        processo.stdin.close()
+        return processo
+
     def sessioni(self):
         return {id_nodo: dati for id_nodo, dati in self.nodi()["nodi"].items() if dati.get("tipo") == "llm"}
 

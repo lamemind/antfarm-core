@@ -28,6 +28,10 @@ Il motore minimo dell'orchestrazione agentica: sessioni che si parlano lungo un 
 - `test/contro-prove.sh` — senza LLM, su una copia del motore in una cartella temporanea: il registro vero non riceve righe
 - `bin/regia.py contro-prova` — un nodo LLM vero prova a scrivere fuori dal grafo, a dichiararsi un altro nodo e a leggere le caselle con `ls`; la regia verifica log e transcript e scrive `contro-prova.md` nella partita. Una partita `*-contro-prova-*` è un collaudo del motore, non un gioco: non ha riga nel registro delle partite, e le sue righe nel log dei messaggi — `arco-negato` compreso — si riconoscono dall'id della partita
 
+## I giochi
+
+- **telefono senza fili** — `giochi/telefono/`. Catena `regia → A → B → C → D → regia`; il messaggio di partenza porta dieci fatti con un numero di tre cifre ciascuno, generati da un seme (`fatti.py`). Due regole (`gioco.py`): `copia` inoltra identico ed è la partita di controllo del motore — sotto 10/10 è un difetto del motore —, `riformula` riscrive con parole proprie entro il 60% delle parole di partenza. L'oracolo conta, salto per salto dal log dei messaggi, i numeri che arrivano intatti come gruppo di cifre isolato: `834` scritto `8.34` o «molti» è perso. `bin/regia.py telefono --regola copia|riformula [--seme N]` gioca una partita; `--a-secco` sostituisce le sessioni con `nodo-inoltro.py`, un nodo script che riceve dal bus come le sessioni, e collauda regia e oracolo senza LLM e senza riga nel registro
+
 ## Il nodo
 
 Un nodo LLM è una sessione Claude Code lanciata dalla regia con `claude --bg --safe-mode --tools Bash --allowedTools "Bash(<orchestra>/bin/bus *)" --permission-mode dontAsk`, nella propria cartella `partite/<partita>/nodi/<nodo>/`:
