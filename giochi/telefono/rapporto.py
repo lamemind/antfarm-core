@@ -34,6 +34,20 @@ def riga_registro(percorso_registro, id_partita):
     return None
 
 
+def prompt_di_lancio(percorso_transcript):
+    """Il testo del primo record umano del transcript: il prompt con cui la regia ha lanciato il nodo."""
+    if not percorso_transcript:
+        return ""
+    with open(percorso_transcript, encoding="utf-8") as transcript:
+        for record in map(json.loads, transcript):
+            if record.get("type") == "user" and (record.get("origin") or {}).get("kind") == "human":
+                contenuto = (record.get("message") or {}).get("content")
+                if isinstance(contenuto, list):
+                    return "\n".join(blocco.get("text", "") for blocco in contenuto if isinstance(blocco, dict))
+                return contenuto or ""
+    return ""
+
+
 def secondi_fra(prima, dopo):
     return round((datetime.fromisoformat(dopo) - datetime.fromisoformat(prima)).total_seconds())
 
@@ -103,8 +117,12 @@ def componi(id_partita, regola, fatti, righe_log, osservazione, registro, percor
     testo += ["", "Fonte: log, righe `consegnato` per arco — campi `testo`, `parole`, `ts`. "
               "I secondi sono la differenza fra i `ts` di due righe `consegnato` consecutive, arrotondata al secondo."]
     if tetto is not None and partenza:
-        testo += [f"Tetto: {tetto} parole, cioè il 60% delle {partenza['parole']} parole del messaggio regia → A, "
-                  "arrotondato per difetto."]
+        frase = f"al massimo {tetto} parole"
+        senza_tetto = [sessione["nodo"] for sessione in osservazione["sessioni"]
+                       if frase not in prompt_di_lancio(sessione["transcript"])]
+        testo += [f"Tetto: {tetto} parole, quello che il prompt di lancio di ogni nodo porta («{frase}»). "
+                  "Fonte: transcript, primo record umano di ogni nodo."
+                  + (f" ⚠️ Prompt senza quel tetto: {', '.join(senza_tetto)}." if senza_tetto else "")]
     testo.append("")
 
     testo += ["## Messaggi per arco", "", "| Arco | Consegnati | Rifiutati | Letti |", "| --- | --- | --- | --- |"]
