@@ -21,6 +21,7 @@ Esce 1 se una sessione fallisce un controllo, 2 su uso sbagliato.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,16 @@ import partita as libpartita  # noqa: E402
 CAMPI_USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 REGISTRO_PARTITE = libgrafo.radice_orchestra() / "registro" / "partite.tsv"
 COLONNE_REGISTRO = ("partita", "gioco", "esito", "turni_umani", "token", "cwd")
+
+
+ESPRESSIONE_RICEVUTO = re.compile(r"^messaggio (m-[0-9a-f]+) da \S+ · grafo v\d+$", re.MULTILINE)
+
+
+def testo_risultato(blocco):
+    contenuto = blocco.get("content")
+    if isinstance(contenuto, list):
+        return "\n".join(parte.get("text", "") for parte in contenuto if isinstance(parte, dict))
+    return contenuto or ""
 
 
 def leggi_records(percorso):
@@ -69,6 +80,13 @@ def misura_sessione(id_nodo, dati_nodo, pid_regia):
     misura["messaggi_peer"] = sum(1 for record in utenti if (record.get("origin") or {}).get("kind") == "peer")
     usi = [blocco for record in records if record.get("type") == "assistant"
            for blocco in (record.get("message") or {}).get("content") or [] if blocco.get("type") == "tool_use"]
+    misura["ricevuti_dal_bus"] = [
+        trovato.group(1)
+        for record in utenti
+        for blocco in ((record.get("message") or {}).get("content") or [] if isinstance((record.get("message") or {}).get("content"), list) else [])
+        if blocco.get("type") == "tool_result"
+        for trovato in [ESPRESSIONE_RICEVUTO.search(testo_risultato(blocco))] if trovato
+    ]
     misura["tool_usati"] = sorted({blocco["name"] for blocco in usi})
     misura["send_message_nativi"] = sum(1 for blocco in usi if blocco["name"] == "SendMessage")
     misura["modelli"] = sorted({messaggio.get("model") for messaggio in messaggi.values() if messaggio.get("model")})

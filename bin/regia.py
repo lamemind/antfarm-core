@@ -11,6 +11,11 @@
         `--a-secco` usa nodi script che inoltrano identico al posto delle sessioni: collauda
         regia, bus e oracolo senza LLM, e non scrive nel registro delle partite.
 
+    orchestra/bin/regia.py rapporto <cartella della partita>
+        riscrive rapporto.md di una partita chiusa del telefono dalle sue tre fonti: la riga del
+        registro delle partite, le righe del log dei messaggi, i transcript dei nodi. Lo stesso
+        rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
+
     orchestra/bin/regia.py contro-prova [--modello <m>]
         partita di prova del bus con un nodo LLM vero: A prova a scrivere a D, poi scrive a B
         dichiarandosi C, poi prova a leggere le caselle con `ls`. Verifica nel log dei messaggi e
@@ -35,6 +40,7 @@ import gioco as telefono_gioco  # noqa: E402
 import grafo as libgrafo  # noqa: E402
 import osserva as libosserva  # noqa: E402
 import partita as libpartita  # noqa: E402
+import rapporto as telefono_rapporto  # noqa: E402
 import vista as libvista  # noqa: E402
 
 RADICE = libgrafo.radice_orchestra()
@@ -201,6 +207,8 @@ def telefono(argomenti):
         })
         riuscita = riuscita and osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
         print(libosserva.come_testo(osservazione))
+        percorso = telefono_rapporto.scrivi(partita.cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+        print(f"rapporto: {percorso}")
     partita.chiudi(esito_oracolo["esito"])
     for salto in esito_oracolo["salti"]:
         if salto.get("mancante"):
@@ -210,6 +218,16 @@ def telefono(argomenti):
                   f"{' · persi ' + str(salto['persi']) if salto['persi'] else ''}")
     print(f"esito dell'oracolo: {esito_oracolo['esito']} · partita {'riuscita' if riuscita else 'NON riuscita'}")
     return 0 if riuscita else 1
+
+
+def rapporto(argomenti):
+    cartella = Path(argomenti.partita).resolve()
+    if not (cartella / "fatti.json").is_file():
+        raise SystemExit(f"non è la cartella di una partita del telefono: {cartella}")
+    osservazione = libosserva.osserva(cartella)
+    percorso = telefono_rapporto.scrivi(cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+    print(f"rapporto: {percorso}")
+    return 0
 # </editor-fold>
 
 
@@ -222,11 +240,15 @@ def main():
     modo.add_argument("--a-secco", action="store_true")
     gioco.add_argument("--seme", type=int, default=42)
     gioco.add_argument("--modello")
+    resoconto = sotto.add_parser("rapporto")
+    resoconto.add_argument("partita")
     prova = sotto.add_parser("contro-prova")
     prova.add_argument("--modello")
     argomenti = parser.parse_args()
     if argomenti.comando == "telefono":
         return telefono(argomenti)
+    if argomenti.comando == "rapporto":
+        return rapporto(argomenti)
     if argomenti.comando == "contro-prova":
         return contro_prova(argomenti)
     return 2
