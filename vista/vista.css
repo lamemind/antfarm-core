@@ -98,6 +98,11 @@ aside section { padding: 12px 16px; min-height: 0; }
 .nodo.lanciato circle { fill: #1b2233; }
 .nodo.chiuso circle { stroke-dasharray: 5 4; }
 .nodo.selezionato circle { stroke: var(--selezione); }
+.nodo.nato-da-spawn circle { animation: nascita 1.2s ease-out 2; }
+@keyframes nascita {
+  0% { stroke-width: 10; }
+  100% { stroke-width: 2.5; }
+}
 .nodo .etichetta { fill: var(--testo); font-size: 18px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
 .nodo .ruolo { fill: var(--tenue); font-size: 12px; text-anchor: middle; pointer-events: none; }
 

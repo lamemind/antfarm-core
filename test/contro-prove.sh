@@ -70,6 +70,11 @@ verifica "classe fuori dall'elenco → ≠0" \
   bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/classe-fuori-elenco.jsonl'"
 verifica "evento messaggio senza id della partita → ≠0" \
   bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/messaggio-senza-partita.jsonl'"
+verifica "flusso sintetico dello spawn → 0" "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/spawn.jsonl"
+jq -c 'if .classe == "spawn" then .delta.archi |= map(select(.da != "redattore")) else . end' \
+  "$ORCHESTRA/test/flussi/spawn.jsonl" > "$TMP/spawn-senza-arco.jsonl"
+verifica "spawn senza l'arco genitore → figlio nel delta → ≠0" \
+  bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/spawn-senza-arco.jsonl'"
 
 echo "vista"
 VISTA_B=$("$TMP/bin/vista.py" "$GRAFO_TELEFONO" B)

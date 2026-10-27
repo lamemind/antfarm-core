@@ -16,6 +16,9 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
   dettaglio con id e testo uguali carattere per carattere alla riga del log dei messaggi
 - contro-prova del bus: il rifiuto arco-negato A → D è un segno sul nodo A, senza corsa, e nel
   disegno non c'è nessun arco A → D
+- spawn sintetico (test/flussi/spawn.jsonl, harness in modo flusso): il figlio compare fra i nodi,
+  gli archi del delta fra gli archi — genitore → figlio compreso —, la testata porta la versione
+  del delta, e i messaggi da e verso il figlio corrono sugli archi nati dallo spawn
 
 Playwright è fissato alla versione il cui Chromium è già in ~/.cache/ms-playwright. Con
 --schermate salva una schermata per scenario. Esce 1 se una verifica fallisce.
@@ -36,6 +39,7 @@ HARNESS = ORCHESTRA / "bin" / "harness.py"
 LOG_MESSAGGI = ORCHESTRA / "registro" / "messaggi.jsonl"
 PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
+FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
 VELOCITA_REPLAY = "20"
 ATTESA_MS = 60000
 
@@ -173,6 +177,37 @@ def scenario_rifiuto(pagina, schermate, log):
             pagina.screenshot(path=str(schermate / "vista-contro-prova-bus.png"))
 
 
+def scenario_spawn(pagina, schermate, _log):
+    print(f"spawn sintetico {FLUSSO_SPAWN.relative_to(ORCHESTRA)}")
+    eventi = [json.loads(testo) for testo in FLUSSO_SPAWN.read_text(encoding="utf-8").split("\n") if testo.strip()]
+    grafo = next(evento for evento in eventi if evento["tipo"] == "partita-aperta")["riga"]["grafo"]
+    spawn = next(evento for evento in eventi if evento["classe"] == "spawn")
+    figlio, genitore = spawn["figlio"]["id"], spawn["genitore"]
+    archi_attesi = sorted({f"{a['da']}→{a['a']}" for a in grafo["archi"] + spawn["delta"]["archi"]})
+    consegnati_al_figlio = [evento for evento in eventi if evento["tipo"] == "consegnato" and figlio in (evento["riga"]["da"], evento["riga"]["a"])]
+    with Harness("flusso", FLUSSO_SPAWN, "--velocita", VELOCITA_REPLAY) as harness:
+        apri_e_attendi(pagina, harness.indirizzo)
+        dom = misura_dom(pagina)
+        verifica(f"il figlio {figlio} compare fra i nodi disegnati", figlio in dom["nodi"], f"nodi: {sorted(dom['nodi'])}")
+        verifica(f"nodi disegnati = nodi del grafo v{grafo['versione']} + nodi del delta",
+                 len(dom["nodi"]) == len(grafo["nodi"]) + len(spawn["delta"]["nodi"]), f"{len(dom['nodi'])} nel DOM")
+        verifica(f"l'arco {genitore} → {figlio} compare nel disegno", f"{genitore}→{figlio}" in dom["archi"])
+        verifica("archi disegnati = archi del grafo + archi del delta", sorted(dom["archi"]) == archi_attesi,
+                 f"{sorted(dom['archi'])}")
+        verifica(f"la testata porta la versione del delta (v{spawn['delta']['versione']})",
+                 dom["versione"].startswith(f"v{spawn['delta']['versione']} "), dom["versione"])
+        for evento in consegnati_al_figlio:
+            riga = evento["riga"]
+            pallino = next((p for p in dom["pallini"] if p["chiave"] == f"{evento['partita']}:{evento['indice']}"), None)
+            corre = pallino is not None and pallino["corsa"] == f"#{dom['archi'].get(riga['da'] + '→' + riga['a'])}"
+            fermo_su = nodo_piu_vicino(dom["nodi"], pallino["posizione"]) if pallino else None
+            verifica(f"il messaggio {riga['da']} → {riga['a']} corre sull'arco nato dallo spawn e si ferma su {riga['a']}",
+                     corre and fermo_su == riga["a"], f"pallino {pallino and pallino['corsa']}, nodo più vicino {fermo_su}")
+        if schermate:
+            pagina.locator(f'[data-nodo="{figlio}"]').click()
+            pagina.screenshot(path=str(schermate / "vista-spawn-sintetico.png"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--schermate", type=Path)
@@ -182,7 +217,7 @@ def main():
     log = righe_del_log()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for scenario in (scenario_controllo, scenario_rifiuto):
+        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn):
             pagina = browser.new_page(viewport={"width": 1400, "height": 900})
             errori_pagina = []
             pagina.on("pageerror", lambda errore: errori_pagina.append(str(errore)))

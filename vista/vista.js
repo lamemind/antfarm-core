@@ -149,6 +149,8 @@ function disegnaNodo(voce) {
   gruppo.append(elementoSvg("circle", { r: RAGGIO_NODO }));
   const etichetta = elementoSvg("text", { class: "etichetta" });
   etichetta.textContent = voce.id;
+  // Un id lungo resta dentro il cerchio: il corpo scende con la lunghezza.
+  etichetta.style.fontSize = `${voce.id.length <= 4 ? 18 : voce.id.length <= 6 ? 15 : voce.id.length <= 8 ? 13 : 11}px`;
   const ruolo = elementoSvg("text", { class: "ruolo", y: RAGGIO_NODO + 18 });
   ruolo.textContent = voce.ruolo || voce.tipo;
   gruppo.append(etichetta, ruolo);
@@ -170,6 +172,10 @@ function disegnaArco(voce) {
   stato.archi.set(chiave, arco);
 }
 
+function testoVersione() {
+  testo("versione", `v${stato.grafo.versione} · ${stato.grafo.nodi.length} nodi · ${stato.grafo.archi.length} archi`);
+}
+
 function nuovaPartita(evento) {
   for (const strato of Object.values(strati)) strato.replaceChildren();
   stato.partita = evento.partita;
@@ -184,9 +190,33 @@ function nuovaPartita(evento) {
   const meta = evento.riga.meta;
   testo("partita", evento.partita);
   testo("gioco", [meta.gioco, meta.regola].filter(Boolean).join(" · "));
-  testo("versione", `v${stato.grafo.versione} · ${stato.grafo.nodi.length} nodi · ${stato.grafo.archi.length} archi`);
+  testoVersione();
   testo("stato-partita", "aperta");
   document.body.dataset.partita = "aperta";
+}
+
+// Lo spawn porta il delta del grafo: il figlio e tutti gli archi che il template gli dà per
+// ruolo, non solo genitore → figlio. Il figlio entra nel cerchio e la disposizione si ricalcola.
+function applicaSpawn(evento) {
+  for (const voce of evento.delta.nodi) {
+    if (stato.nodi.has(voce.id)) continue;
+    stato.grafo.nodi.push(voce);
+    disegnaNodo(voce);
+  }
+  for (const voce of evento.delta.archi) {
+    if (stato.archi.has(chiaveArco(voce.da, voce.a))) continue;
+    stato.grafo.archi.push(voce);
+    disegnaArco(voce);
+  }
+  stato.grafo.versione = evento.delta.versione;
+  aggiornaGeometria();
+  testoVersione();
+  stato.nodi.get(evento.genitore)?.eventi.push(evento);
+  const figlio = stato.nodi.get(evento.figlio.id);
+  if (figlio) {
+    figlio.eventi.push(evento);
+    figlio.elemento.classList.add("nato-da-spawn");
+  }
 }
 // </editor-fold>
 
@@ -265,6 +295,10 @@ function gestisci(evento) {
     return;
   }
   if (evento.partita !== stato.partita) return;
+  if (evento.classe === "spawn") {
+    applicaSpawn(evento);
+    return;
+  }
   if (evento.classe === "messaggio") {
     if (evento.tipo === "consegnato") pallinoConsegnato(evento);
     else if (evento.tipo === "rifiutato") segnoRifiuto(evento);
