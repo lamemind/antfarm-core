@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/evento.schema.json",
+  "title": "Evento dell'harness di osservabilità",
+  "description": "Un evento avvolge la riga sorgente intatta: in cima classe, tipo, ts e partita, nel campo riga la riga del log dei messaggi o la voce di nodi.json/meta.json così come il motore l'ha scritta. La riga resta aperta a campi nuovi del motore; l'involucro no. La coerenza fra involucro e riga (stessa partita, stesso esito, stesso ts) la controlla valida-eventi.py.",
+  "type": "object",
+  "required": ["classe", "tipo", "ts", "partita", "riga"],
+  "properties": {
+    "classe": {"enum": ["sessione", "messaggio", "spawn"]},
+    "tipo": {"type": "string"},
+    "ts": {"$ref": "#/$defs/ts"},
+    "partita": {"$ref": "#/$defs/partita"},
+    "riga": {"type": "object"}
+  },
+  "allOf": [
+    {"if": {"properties": {"classe": {"const": "messaggio"}}, "required": ["classe"]}, "then": {"$ref": "#/$defs/messaggio"}},
+    {"if": {"properties": {"classe": {"const": "sessione"}}, "required": ["classe"]}, "then": {"$ref": "#/$defs/sessione"}},
+    {"if": {"properties": {"classe": {"const": "spawn"}}, "required": ["classe"]}, "then": {"$ref": "#/$defs/spawn"}}
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "ts": {
+      "description": "Ora ISO 8601 con fuso, come la scrivono bus e regia.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?([+-]\\d{2}:\\d{2}|Z)$"
+    },
+    "partita": {
+      "description": "Id della partita, il nome della sua cartella sotto partite/. Una riga del log senza partita non diventa evento.",
+      "type": "string",
+      "minLength": 1
+    },
+    "messaggio": {
+      "description": "Una riga del log dei messaggi. La chiave di un messaggio è partita + indice, perché un rifiuto ha id null.",
+      "required": ["indice"],
+      "properties": {
+        "tipo": {"enum": ["consegnato", "rifiutato", "letto"]},
+        "indice": {
+          "description": "Numero della riga nel log dei messaggi, da 1.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "riga": {
+          "type": "object",
+          "required": ["ts", "partita", "id", "esito", "da", "a", "versione"],
+          "properties": {
+            "ts": {"$ref": "#/$defs/ts"},
+            "partita": {"$ref": "#/$defs/partita"},
+            "id": {"type": ["string", "null"]},
+            "esito": {"enum": ["consegnato", "rifiutato", "letto"]},
+            "motivo": {"type": ["string", "null"]},
+            "da": {"type": ["string", "null"]},
+            "a": {"type": ["string", "null"]},
+            "versione": {"type": ["integer", "null"]},
+            "testo": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+    "sessione": {
+      "description": "Ciclo di vita di partita e nodi, letto da meta.json e nodi.json che scrive la regia.",
+      "properties": {
+        "tipo": {"enum": ["partita-aperta", "partita-chiusa", "nodo-lanciato", "nodo-chiuso"]},
+        "nodo": {"$ref": "grafo.schema.json#/$defs/id"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"tipo": {"enum": ["nodo-lanciato", "nodo-chiuso"]}}, "required": ["tipo"]},
+          "then": {
+            "description": "riga è la voce del nodo in nodi.json.",
+            "required": ["nodo"],
+            "properties": {"riga": {"type": "object", "required": ["tipo", "lanciato"]}}
+          },
+          "else": {"not": {"required": ["nodo"]}}
+        },
+        {
+          "if": {"properties": {"tipo": {"const": "partita-aperta"}}, "required": ["tipo"]},
+          "then": {
+            "description": "riga porta meta.json e grafo.json della partita: la vista disegna da qui.",
+            "properties": {"riga": {
+              "type": "object",
+              "required": ["meta", "grafo"],
+              "additionalProperties": false,
+              "properties": {
+                "meta": {"$ref": "#/$defs/meta"},
+                "grafo": {"$ref": "grafo.schema.json"}
+              }
+            }}
+          }
+        },
+        {
+          "if": {"properties": {"tipo": {"const": "partita-chiusa"}}, "required": ["tipo"]},
+          "then": {
+            "description": "riga è meta.json a partita chiusa.",
+            "properties": {"riga": {"allOf": [{"$ref": "#/$defs/meta"}, {"required": ["fine"]}]}}
+          }
+        }
+      ]
+    },
+    "meta": {
+      "type": "object",
+      "required": ["partita", "gioco", "inizio"],
+      "properties": {
+        "partita": {"$ref": "#/$defs/partita"},
+        "gioco": {"type": "string"},
+        "inizio": {"$ref": "#/$defs/ts"},
+        "fine": {"$ref": "#/$defs/ts"}
+      }
+    },
+    "spawn": {
+      "description": "Un nodo che ne crea un altro da un template. Porta il delta del grafo che ne risulta, perché il template fissa gli archi del figlio per ruolo e uno spawn aggiunge più archi del solo genitore → figlio.",
+      "required": ["genitore", "figlio", "template", "delta"],
+      "properties": {
+        "tipo": {"const": "spawn"},
+        "genitore": {"$ref": "grafo.schema.json#/$defs/id"},
+        "figlio": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "tipo"],
+          "properties": {
+            "id": {"$ref": "grafo.schema.json#/$defs/id"},
+            "tipo": {"$ref": "grafo.schema.json#/$defs/nodo/properties/tipo"}
+          }
+        },
+        "template": {"type": "string", "minLength": 1},
+        "delta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["versione", "nodi", "archi"],
+          "properties": {
+            "versione": {"type": "integer", "minimum": 2},
+            "nodi": {"type": "array", "minItems": 1, "items": {"$ref": "grafo.schema.json#/$defs/nodo"}},
+            "archi": {"type": "array", "minItems": 1, "items": {"$ref": "grafo.schema.json#/$defs/arco"}}
+          }
+        }
+      }
+    }
+  }
+}

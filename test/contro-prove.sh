@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contro-prove deterministiche del motore: validatore, vista, bus. Nessun LLM.
+# Contro-prove deterministiche del motore: validatore del grafo e degli eventi, vista, bus. Nessun LLM.
 #
 #   orchestra/test/contro-prove.sh
 #
@@ -62,6 +62,14 @@ verifica "arco verso un nodo inesistente → ≠0" \
   bash -c "! '$TMP/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/arco-verso-nodo-inesistente.json'"
 verifica "diritto fuori dall'elenco → ≠0" \
   bash -c "! '$TMP/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/diritto-fuori-elenco.json'"
+
+echo "validatore degli eventi"
+verifica "evento messaggio ricavato da una riga del log → 0" \
+  "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/eventi/messaggio-valido.jsonl"
+verifica "classe fuori dall'elenco → ≠0" \
+  bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/classe-fuori-elenco.jsonl'"
+verifica "evento messaggio senza id della partita → ≠0" \
+  bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/messaggio-senza-partita.jsonl'"
 
 echo "vista"
 VISTA_B=$("$TMP/bin/vista.py" "$GRAFO_TELEFONO" B)
