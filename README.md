@@ -20,12 +20,16 @@ Il motore minimo dell'orchestrazione agentica: sessioni che si parlano lungo un 
 | `template/` | template di spawn (`$G`) |
 | `giochi/<gioco>/` | definizione di un gioco: grafo, prompt dei nodi, regole |
 | `partite/<partita>/` | una partita: `grafo.json`, `nodi.json`, `meta.json`, `caselle/<nodo>/`, `nodi/<nodo>/` (cwd della sessione del nodo), `rapporto.md` |
-| `schema/` | schema del grafo |
-| `test/contro-prove.sh` | contro-prove deterministiche di validatore, vista e bus, su una copia isolata del motore |
+| `schema/` | schema del grafo e schema degli eventi dell'harness |
+| `vista/` | la pagina della vista web, servita dall'harness |
+| `test/contro-prove.sh` | contro-prove deterministiche dei due validatori, della vista per agente e del bus, su una copia isolata del motore |
+| `test/eventi/`, `test/flussi/` | eventi di contro-prova del validatore, flussi di eventi sintetici per l'harness |
 
 ## Collaudo
 
 - `test/contro-prove.sh` — senza LLM, su una copia del motore in una cartella temporanea: il registro vero non riceve righe
+- `test/collaudo-harness.sh` — senza LLM: rigioca le partite di riferimento e confronta gli eventi ricevuti dal client di prova (`bin/ascolta.py`) col log dei messaggi e con `nodi.json`; controlla che registro e log non cambino, che la porta sia legata solo a `127.0.0.1`, e gioca una partita a secco dal vivo su una copia del motore, misurando il ritardo fra la riga del log e l'arrivo al client
+- `test/collaudo-vista.py` — senza LLM, Chromium headless pilotato da Playwright: conta nodi, archi e pallini dal DOM contro `grafo.json` e il log, controlla che ogni pallino corra sul proprio arco, che il rifiuto resti sul mittente, che il clic porti la riga del log intatta, che lo spawn sintetico aggiunga figlio e archi
 - `bin/regia.py contro-prova` — un nodo LLM vero prova a scrivere fuori dal grafo, a dichiararsi un altro nodo e a leggere le caselle con `ls`; la regia verifica log e transcript e scrive `contro-prova.md` nella partita. Una partita `*-contro-prova-*` è un collaudo del motore, non un gioco: non ha riga nel registro delle partite, e le sue righe nel log dei messaggi — `arco-negato` compreso — si riconoscono dall'id della partita
 
 ## I giochi
@@ -46,3 +50,22 @@ Un messaggio arriva al nodo come `tool_result` di `bus recv`, quindi nel transcr
 ## Osservabilità
 
 `bin/osserva.py` legge i transcript dei nodi di una partita e ne verifica i tre controlli: transcript con almeno un turno dell'assistente, genitore scritto dalla regia in `nodi.json`, somma dei quattro campi `usage` calcolabile. Conta anche i turni umani — record `user` con `origin.kind` = `human` dopo il primo, che è il lancio — e i token, somma di `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` su ogni messaggio dell'assistente. Un messaggio si conta una volta per `message.id`: Claude Code scrive un record per blocco — thinking, testo, tool_use — e ognuno ripete l'`usage` del messaggio, quindi la somma per record conta lo stesso messaggio due o tre volte. Accanto ai controlli `osserva.py` conta i messaggi nativi ricevuti (`origin.kind` = `peer`) e le chiamate a `SendMessage`: su un nodo isolato sono 0.
+
+## Harness e vista
+
+`bin/harness.py` legge le sorgenti del motore, ne fa eventi e li pubblica su un WebSocket; `vista/` è la pagina che li disegna. L'harness legge soltanto: non scrive in `registro/` né in `partite/`, perché un osservatore che scrive dove scrive il motore ne sposterebbe le misure.
+
+- **gli eventi** — tre classi, schema in `schema/evento.schema.json`: `sessione` (`partita-aperta`, `partita-chiusa`, `nodo-lanciato`, `nodo-chiuso`, da `meta.json` e `nodi.json`), `messaggio` (`consegnato`, `rifiutato`, `letto`: una riga del log dei messaggi ciascuno), `spawn`. Ogni evento porta in cima `classe`, `tipo`, `ts`, `partita` e nel campo `riga` la riga sorgente intatta, quindi un campo nuovo del bus non cambia lo schema. Un messaggio porta anche `indice`, il numero della sua riga nel log: la chiave di un messaggio è partita più indice, perché un rifiuto ha `id` null. `partita-aperta` porta `meta.json` e `grafo.json`, e la vista disegna da lì. Lo spawn porta genitore, figlio, template e il delta del grafo — nodi, archi, versione —, perché il template fissa gli archi del figlio per ruolo. Le righe del log senza partita (`mittente-ignoto`) non diventano eventi: l'harness le conta e stampa il conteggio su stderr alla chiusura. `bin/valida-eventi.py <eventi.jsonl>` è il gate del formato: esce 0 se ogni riga è un evento valido e coerente con la sua riga sorgente, 1 altrimenti
+- **l'accensione** — una porta sola, legata a `127.0.0.1`, default 8740 (`--porta 0` la fa scegliere al sistema): `/` serve la vista, `/canale.json` il modo e la velocità, `/eventi` il WebSocket. La prima riga su stdout porta l'indirizzo. Il WebSocket rifiuta con 403 una pagina d'altra origine, perché il log porta il testo integrale dei messaggi. Si ferma con SIGINT o SIGTERM
+- **il replay** — `bin/harness.py replay <partita>... [--velocita V]` rigioca partite chiuse, una dopo l'altra, in ordine di ts e coi tempi divisi per V; `--velocita 0` emette senza attesa. Ogni client riceve il replay intero dall'inizio, poi il canale si chiude con «fine replay»
+- **il dal vivo** — `bin/harness.py vivo` segue le partite aperte all'accensione e quelle che nascono dopo: legge il log dei messaggi dall'inizio e ne segue la coda ogni 100 ms, quindi può partire prima o dopo la regia senza perdere righe. Prima di emettere una chiusura — di un nodo o della partita — rilegge il log, così la chiusura arriva dopo l'ultima riga che la precede. Ogni client riceve prima gli eventi già emessi, poi i nuovi
+- **il flusso** — `bin/harness.py flusso <eventi.jsonl> [--velocita V]` invia un file di eventi così come è scritto, coi tempi dei ts: collauda ciò che il motore non produce ancora, come lo spawn (`test/flussi/spawn.jsonl`)
+- **la vista** — SVG scritto a mano, nessuna libreria: nodi su un cerchio nell'ordine di `grafo.json`, archi come curve orientate. Un messaggio consegnato è un pallino che corre lungo l'arco `da → a` e resta acceso sul destinatario; la lettura lo spegne senza toglierlo; un rifiuto è un segno fermo sul nodo mittente, perché non ha un arco su cui correre. Uno spawn applica il delta e ricalcola il cerchio. Il clic su un pallino mostra l'evento grezzo, su un arco i messaggi che vi sono corsi, su un nodo i suoi eventi di sessione. La pagina disegna l'ultima partita aperta e non manda niente all'harness: la velocità si sceglie all'accensione. I collaudi leggono gli attributi `data-nodo`, `data-arco`, `data-pallino` (chiave `partita:indice`), `data-esito`, `data-evento`
+- **la chiusura dei nodi** — a fine partita la regia scrive nella voce di ogni nodo di `nodi.json` `chiuso`, l'ora al millesimo, e `azioni_fuori_bus`: le chiamate a tool del transcript che non sono un comando Bash del bus, `null` per un nodo script. L'harness emette `nodo-chiuso` da questi due campi e non apre mai i transcript, e il clic sul nodo li mostra. Le partite giocate prima di questi campi non hanno `nodo-chiuso` nel replay
+
+Dal vivo, con la vista nel browser:
+
+```
+orchestra/bin/harness.py vivo                     # poi apri http://127.0.0.1:8740/
+orchestra/bin/regia.py telefono --regola riformula
+```
