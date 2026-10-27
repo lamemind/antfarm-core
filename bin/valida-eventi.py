@@ -80,7 +80,9 @@ def main():
         print(__doc__.strip(), file=sys.stderr)
         return 2
     try:
-        righe = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+        # Taglio sul solo a capo: un testo può portare separatori di riga Unicode, che
+        # splitlines() prenderebbe per a capo spezzando l'evento.
+        righe = Path(sys.argv[1]).read_text(encoding="utf-8").split("\n")
     except OSError as errore:
         print(f"file illeggibile: {errore}", file=sys.stderr)
         return 2
