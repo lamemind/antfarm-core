@@ -1,0 +1,122 @@
+:root {
+  --fondo: #0f1117;
+  --pannello: #171a22;
+  --bordo: #262b37;
+  --testo: #e6e8ef;
+  --tenue: #8a90a2;
+  --arco: #4a5266;
+  --arco-acceso: #9aa6c4;
+  --nodo-llm: #5b8cff;
+  --nodo-script: #9aa3b5;
+  --nodo-umano: #f2b33d;
+  --nodo-sorgente: #6fcf97;
+  --pallino: #ffe27a;
+  --pallino-spento: #6b6550;
+  --rifiuto: #ff5d5d;
+  --selezione: #ffffff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  background: var(--fondo);
+  color: var(--testo);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 24px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bordo);
+  background: var(--pannello);
+}
+
+h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
+h2 { margin: 0 0 8px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--tenue); }
+
+#testata { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0; }
+#testata div { display: flex; gap: 6px; }
+#testata dt { color: var(--tenue); }
+#testata dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+#grafo { width: 100%; height: 100%; min-height: 420px; display: block; }
+
+aside {
+  border-left: 1px solid var(--bordo);
+  background: var(--pannello);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+aside section { padding: 12px 16px; min-height: 0; }
+#dettaglio { flex: 0 1 55%; overflow: auto; border-bottom: 1px solid var(--bordo); }
+#registro { flex: 1 1 45%; overflow: auto; }
+
+#dettaglio-json {
+  margin: 0;
+  font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--testo);
+}
+
+#registro-eventi { margin: 0; padding: 0; list-style: none; font: 12px/1.5 ui-monospace, Menlo, monospace; }
+#registro-eventi li { padding: 2px 4px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#registro-eventi li:hover { background: var(--bordo); }
+#registro-eventi .ora { color: var(--tenue); margin-right: 6px; }
+#registro-eventi .rifiutato { color: var(--rifiuto); }
+
+/* grafo */
+#freccia path { fill: var(--arco); }
+
+.arco { fill: none; stroke: var(--arco); stroke-width: 2; }
+.arco-presa { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
+[data-arco]:hover .arco, [data-arco].selezionato .arco { stroke: var(--arco-acceso); }
+
+.nodo { cursor: pointer; }
+.nodo circle { fill: var(--fondo); stroke: var(--nodo-script); stroke-width: 2.5; }
+.nodo.tipo-llm circle { stroke: var(--nodo-llm); }
+.nodo.tipo-umano circle { stroke: var(--nodo-umano); }
+.nodo.tipo-sorgente circle { stroke: var(--nodo-sorgente); }
+.nodo.lanciato circle { fill: #1b2233; }
+.nodo.chiuso circle { stroke-dasharray: 5 4; }
+.nodo.selezionato circle { stroke: var(--selezione); }
+.nodo .etichetta { fill: var(--testo); font-size: 18px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.nodo .ruolo { fill: var(--tenue); font-size: 12px; text-anchor: middle; pointer-events: none; }
+
+.pallino {
+  fill: var(--pallino);
+  cursor: pointer;
+  filter: drop-shadow(0 0 5px var(--pallino)) drop-shadow(0 0 10px var(--pallino));
+}
+.pallino.spento { fill: var(--pallino-spento); filter: none; }
+.pallino.selezionato { stroke: var(--selezione); stroke-width: 2; }
+
+.rifiuto { cursor: pointer; }
+.rifiuto circle { fill: var(--fondo); stroke: var(--rifiuto); stroke-width: 2; }
+.rifiuto line { stroke: var(--rifiuto); stroke-width: 2.5; stroke-linecap: round; }
+.rifiuto.selezionato circle { stroke: var(--selezione); }
+
+@media (max-width: 860px) {
+  body { height: auto; min-height: 100vh; }
+  main { grid-template-columns: 1fr; grid-template-rows: auto; }
+  aside { border-left: 0; border-top: 1px solid var(--bordo); }
+  #grafo { min-height: 320px; }
+}
