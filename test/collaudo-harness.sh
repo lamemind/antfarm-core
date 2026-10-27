@@ -12,7 +12,8 @@
 #   connessione con un'origine estranea è rifiutata
 # dal vivo a secco — su una copia del motore in una cartella temporanea, come contro-prove.sh:
 #   harness acceso, client in ascolto, regia --a-secco; il client riceve ogni riga che la partita
-#   aggiunge al $M della copia, e stampa il ritardo fra il ts della riga e l'arrivo (mediana, massimo)
+#   aggiunge al $M della copia, un nodo-chiuso per ogni nodo dopo il suo ultimo invio, e stampa il
+#   ritardo fra il ts della riga e l'arrivo (mediana, massimo)
 #
 # Esce 1 se una verifica fallisce.
 set -uo pipefail
@@ -130,6 +131,13 @@ printf '  partita %s · righe in $M: %s · eventi messaggio: %s\n' "$PARTITA_VIV
 verifica "ogni riga che la partita aggiunge a \$M arriva al client, stessi indici" uguali "$INDICI_VIVO" "$RIGHE_VIVO"
 verifica "valida-eventi.py esce 0 sugli eventi dal vivo" "$COPIA/bin/valida-eventi.py" "$TMP/vivo.jsonl"
 verifica "lanciati A, B, C, D" jq -e '[.nodi_lanciati[][1]] | sort == ["A","B","C","D"]' "$TMP/vivo-riepilogo.json"
+verifica "un nodo-chiuso per ogni nodo lanciato, scritto dalla regia in nodi.json" \
+  jq -e '[.nodi_chiusi[][1]] | sort == ["A","B","C","D"]' "$TMP/vivo-riepilogo.json"
+verifica "nodo script: azioni_fuori_bus null nella voce del nodo-chiuso" \
+  jq -se '[.[] | select(.tipo == "nodo-chiuso")] | length == 4 and all(.riga.azioni_fuori_bus == null and .riga.tipo == "script")' "$TMP/vivo.jsonl"
+verifica "ogni nodo-chiuso arriva dopo l'ultimo messaggio inviato da quel nodo" \
+  jq -se 'to_entries as $e | [$e[] | select(.value.tipo == "nodo-chiuso")] | all(. as $c |
+    ([$e[] | select(.value.classe == "messaggio" and .value.riga.da == $c.value.nodo) | .key] | max // -1) < $c.key)' "$TMP/vivo.jsonl"
 printf '  ritardo ts → client: %s\n' "$(jq -c '.ritardo_ms' "$TMP/vivo-riepilogo.json")"
 
 echo

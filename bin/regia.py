@@ -66,25 +66,6 @@ def righe_log(id_partita):
         return [riga for riga in map(json.loads, log) if riga.get("partita") == id_partita]
 
 
-def chiamate_bash(percorso_transcript):
-    """(comando, esito testuale, is_error) per ogni Bash del transcript, nell'ordine."""
-    usi, risultati = [], {}
-    with open(percorso_transcript, encoding="utf-8") as transcript:
-        for record in map(json.loads, transcript):
-            contenuto = (record.get("message") or {}).get("content")
-            if record.get("type") not in ("assistant", "user") or not isinstance(contenuto, list):
-                continue
-            for blocco in contenuto:
-                if blocco.get("type") == "tool_use":
-                    usi.append((blocco["id"], blocco["name"], blocco.get("input", {}).get("command", "")))
-                elif blocco.get("type") == "tool_result":
-                    testo = blocco.get("content")
-                    if isinstance(testo, list):
-                        testo = "\n".join(parte.get("text", "") for parte in testo)
-                    risultati[blocco["tool_use_id"]] = (testo or "", bool(blocco.get("is_error")))
-    return [(nome, comando, *risultati.get(id_uso, ("", None))) for id_uso, nome, comando in usi]
-
-
 # <editor-fold defaultstate="collapsed" desc="contro-prova">
 PROMPT_CONTRO_PROVA = """Sei il nodo A di una partita di prova del motore orchestra. Il tuo solo strumento è il comando del bus, e lo usi solo nei passi qui sotto.
 
@@ -111,7 +92,7 @@ def contro_prova(argomenti):
     partita.ferma_nodi()
     righe = righe_log(partita.id)
     percorso = libpartita.transcript(nodo["sessionId"])
-    chiamate = chiamate_bash(percorso) if percorso else []
+    chiamate = libpartita.chiamate_bash(percorso) if percorso else []
     comandi_ls = [chiamata for chiamata in chiamate if chiamata[1].startswith("ls")]
     comandi_vista = [chiamata for chiamata in chiamate if chiamata[1].endswith("bus vista")]
     verifiche = [
@@ -167,12 +148,11 @@ def telefono(argomenti):
     })
     scrivi_json(partita.cartella / "fatti.json", {"seme": argomenti.seme, "fatti": fatti, "messaggio_di_partenza": partenza})
     grafo = partita.grafo()
-    processi_script = []
     for nodo in telefono_gioco.NODI:
         successore = telefono_gioco.SUCCESSORE[nodo]
         compito = f"telefono senza fili, regola {regola}: ricevere un messaggio e consegnarlo a {successore}"
         if argomenti.a_secco:
-            processi_script.append(partita.lancia_nodo_script(nodo, [sys.executable, NODO_INOLTRO, successore], compito))
+            partita.lancia_nodo_script(nodo, [sys.executable, NODO_INOLTRO, successore], compito)
         else:
             vista = libvista.come_testo(libvista.vista(grafo, nodo))
             prompt = telefono_gioco.prompt_nodo(nodo, vista, libpartita.BUS, regola, tetto)
@@ -186,8 +166,7 @@ def telefono(argomenti):
         raise SystemExit(f"il bus ha rifiutato il messaggio di partenza: {invio.stderr}")
     arrivo = libpartita.ricevi(SCADENZA_PARTITA_S)
     print(f"arrivo: {'da ' + arrivo[0] + ' · ' + arrivo[1] if arrivo else 'nessuno entro la scadenza'}")
-    for processo in processi_script:
-        processo.wait(timeout=60)
+    partita.attendi_nodi_script(60)
     rimasti = partita.attendi_fine_nodi(SCADENZA_CHIUSURA_NODI_S)
     partita.ferma_nodi()
 

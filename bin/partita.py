@@ -3,6 +3,11 @@
 Libreria della regia. Scrive i due file che legano una sessione alla partita senza chiedere
 niente all'agente: nodi.json — la coppia (pid, starttime) che il bus confronta con gli antenati
 del chiamante, più sessionId, genitore e compito — e meta.json, i parametri della partita.
+
+A fine partita scrive nella voce di ogni nodo `chiuso`, l'ora al millesimo, e `azioni_fuori_bus`:
+per un nodo LLM le chiamate a tool del transcript che non sono un comando Bash del bus, per un
+nodo script null, perché non ha transcript. L'harness legge i due campi da nodi.json e non apre
+mai i transcript: il formato di Claude Code si legge solo qui.
 """
 
 import json
@@ -26,8 +31,8 @@ ESPRESSIONE_LANCIO = re.compile(r"backgrounded · ([0-9a-f]{8}) · ")
 ATTESA_SERVIZIO_S = 60
 
 
-def adesso():
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+def adesso(precisione="seconds"):
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec=precisione)
 
 
 def avvio_processo(pid):
@@ -46,6 +51,7 @@ class Partita:
     def __init__(self, cartella):
         self.cartella = Path(cartella)
         self.id = self.cartella.name
+        self.processi_script = {}
 
     @property
     def file_nodi(self):
@@ -96,6 +102,16 @@ class Partita:
     def registra(self, id_nodo, dati):
         nodi = self.nodi()
         nodi["nodi"][id_nodo] = dati
+        scrivi_json(self.file_nodi, nodi)
+
+    def segna_chiuso(self, id_nodo, azioni_fuori_bus):
+        """`chiuso` e `azioni_fuori_bus` nella voce del nodo; un nodo già chiuso resta com'è."""
+        nodi = self.nodi()
+        voce = nodi["nodi"][id_nodo]
+        if "chiuso" in voce:
+            return
+        voce["chiuso"] = adesso("milliseconds")
+        voce["azioni_fuori_bus"] = azioni_fuori_bus
         scrivi_json(self.file_nodi, nodi)
 
     def chiudi(self, esito):
@@ -156,6 +172,7 @@ class Partita:
         uscita = open(self.cartella / f"uscita-{id_nodo}.txt", "w", encoding="utf-8")
         processo = subprocess.Popen(comando, cwd=cwd, stdin=subprocess.PIPE, stdout=uscita,
                                     stderr=subprocess.STDOUT, text=True)
+        self.processi_script[id_nodo] = processo
         self.registra(id_nodo, {
             "tipo": "script",
             "pid": processo.pid,
@@ -184,9 +201,18 @@ class Partita:
                 return al_lavoro
             time.sleep(5)
 
+    def attendi_nodi_script(self, scadenza_s):
+        """Aspetta la fine di ogni nodo script e ne segna la chiusura; solleva TimeoutExpired alla scadenza."""
+        for id_nodo, processo in self.processi_script.items():
+            processo.wait(timeout=scadenza_s)
+            self.segna_chiuso(id_nodo, None)
+
     def ferma_nodi(self):
-        for dati in self.sessioni().values():
+        """Ferma ogni sessione, poi ne segna la chiusura con le azioni fuori bus contate sul transcript."""
+        for id_nodo, dati in self.sessioni().items():
             subprocess.run(["claude", "stop", dati["short_id"]], capture_output=True, text=True, timeout=60)
+            percorso = transcript(dati["sessionId"])
+            self.segna_chiuso(id_nodo, azioni_fuori_bus(percorso) if percorso else None)
 
 
 def stati_sessioni():
@@ -212,6 +238,31 @@ def transcript(session_id):
     """Il transcript di una sessione, cercato per id fra i progetti di Claude Code."""
     trovati = sorted(PROGETTI_CLAUDE.glob(f"*/{session_id}.jsonl"))
     return trovati[0] if trovati else None
+
+
+def chiamate_bash(percorso_transcript):
+    """(nome del tool, comando, esito testuale, is_error) per ogni chiamata a tool del transcript, nell'ordine."""
+    usi, risultati = [], {}
+    with open(percorso_transcript, encoding="utf-8") as file_transcript:
+        for record in map(json.loads, file_transcript):
+            contenuto = (record.get("message") or {}).get("content")
+            if record.get("type") not in ("assistant", "user") or not isinstance(contenuto, list):
+                continue
+            for blocco in contenuto:
+                if blocco.get("type") == "tool_use":
+                    usi.append((blocco["id"], blocco["name"], blocco.get("input", {}).get("command", "")))
+                elif blocco.get("type") == "tool_result":
+                    testo = blocco.get("content")
+                    if isinstance(testo, list):
+                        testo = "\n".join(parte.get("text", "") for parte in testo)
+                    risultati[blocco["tool_use_id"]] = (testo or "", bool(blocco.get("is_error")))
+    return [(nome, comando, *risultati.get(id_uso, ("", None))) for id_uso, nome, comando in usi]
+
+
+def azioni_fuori_bus(percorso_transcript):
+    """Le chiamate a tool che non sono un comando Bash del bus: tutto ciò che un nodo fa fuori dal canale."""
+    return sum(1 for nome, comando, _, _ in chiamate_bash(percorso_transcript)
+               if nome != "Bash" or not comando.lstrip().startswith(str(BUS)))
 
 
 def invia(testo, destinatario):
