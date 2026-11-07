@@ -165,6 +165,46 @@ jq -c 'select(.partita=="prova-sorgente" and .esito=="scritto") | {classe: "mess
 verifica "evento messaggio/scritto dalla riga del log → valido" "$TMP/bin/valida-eventi.py" "$TMP/scritto.jsonl"
 sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 
+echo "nodo umano"
+verifica "grafo col nodo umano valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFI/umano.json"
+PARTITA="$TMP/partite/prova-umano"
+mkdir -p "$PARTITA/caselle" "$PARTITA/nodi"
+cp "$GRAFI/umano.json" "$PARTITA/grafo.json"
+printf '{"partita": "prova-umano", "stato": "aperta", "nodi": {}}\n' > "$PARTITA/nodi.json"
+come_nodo A "$BUS" send umano "B mi chiede una cosa: confermi?"
+verifica "A send umano esce 0" test $? -eq 0
+verifica "A send umano: una riga consegnato nel log, da A a umano" \
+  jq -e -s '[.[] | select(.partita=="prova-umano" and .esito=="consegnato" and .da=="A" and .a=="umano")] | length == 1' "$LOG"
+verifica "il messaggio resta nella casella dell'umano" \
+  test "$(find "$PARTITA/caselle/umano" -maxdepth 1 -name '[0-9]*.json' | wc -l)" -eq 1
+REGISTRA_UMANO=$(python3 - "$TMP/bin" "$PARTITA" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+import partita
+try:
+    partita.Partita(sys.argv[2]).registra("umano", {"tipo": "umano", "pid": 1, "starttime": 1})
+except ValueError as errore:
+    print(f"rifiutato: {errore}")
+    sys.exit(0)
+print("registrato")
+sys.exit(1)
+PY
+)
+verifica "la regia non registra un processo per umano" grep -q '^rifiutato: umano è un nodo umano' <<< "$REGISTRA_UMANO"
+verifica "nodi.json non porta una voce per umano" jq -e '.nodi | has("umano") | not' "$PARTITA/nodi.json"
+CONTEGGIO_UMANO=$(python3 - "$TMP/bin" "$LOG" "$PARTITA" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import misure
+conteggio = misure.nodo_umano(misure.righe_log(sys.argv[2], "prova-umano"), sys.argv[3])
+print(json.dumps({"messaggi": len(conteggio["messaggi"]), "letti": conteggio["letti"],
+                  "risposte": conteggio["risposte"], "in_casella": conteggio["in_casella"]}))
+PY
+)
+verifica "conteggio del rapporto: 1 messaggio, 0 letti, 0 risposte, 1 in casella" \
+  jq -e '.messaggi == 1 and .letti == 0 and .risposte == 0 and .in_casella == 1' <<< "$CONTEGGIO_UMANO"
+sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
+
 echo "oracolo del telefono"
 ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'
 import json, sys

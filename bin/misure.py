@@ -150,6 +150,36 @@ def sezione_turni_umani(osservazione, righe):
     return testo
 
 
+def nodo_umano(righe, cartella_partita, nodo="umano"):
+    """Il nodo umano passivo: i messaggi che riceve, quanti ne sono stati letti, quanti restano
+    nella sua casella, quante risposte ha mandato. Nessun processo legge la sua casella, quindi in
+    una partita senza turni umani i letti e le risposte sono 0 e ogni messaggio resta in casella."""
+    casella = Path(cartella_partita) / "caselle" / nodo
+    return {
+        "messaggi": [riga for riga in righe if riga["esito"] == "consegnato" and riga["a"] == nodo],
+        "letti": sum(1 for riga in righe if riga["esito"] == "letto" and riga["a"] == nodo),
+        "risposte": sum(1 for riga in righe if riga["esito"] == "consegnato" and riga["da"] == nodo),
+        "in_casella": len(list(casella.glob("[0-9]*.json"))) if casella.is_dir() else 0,
+    }
+
+
+def sezione_nodo_umano(righe, cartella_partita, nodo="umano"):
+    conteggio = nodo_umano(righe, cartella_partita, nodo)
+    messaggi = conteggio["messaggi"]
+    testo = ["## Messaggi all'umano", ""]
+    if messaggi:
+        testo += ["| # | Da | ts | Testo |", "| --- | --- | --- | --- |"]
+        testo += [f"| {indice} | {riga['da']} | {riga['ts']} | {riga['testo'].replace('|', '¦')} |"
+                  for indice, riga in enumerate(messaggi, start=1)]
+        testo.append("")
+    testo += [f"Messaggi al nodo `{nodo}`: **{len(messaggi)}** · letti {conteggio['letti']} · ancora nella casella "
+              f"{conteggio['in_casella']} · risposte dell'umano {conteggio['risposte']}. "
+              + ("Tutti senza risposta: il nodo umano è passivo." if messaggi and not conteggio["risposte"] else ""), "",
+              f"Fonte: log — righe `consegnato` con `a` = `{nodo}`, righe `letto` con `a` = `{nodo}`, righe `consegnato` "
+              f"con `da` = `{nodo}`; cartella della partita, file in `caselle/{nodo}/` mai prelevati.", ""]
+    return testo
+
+
 def sezione_transcript(osservazione):
     testo = ["## Transcript", ""]
     for sessione in osservazione["sessioni"]:

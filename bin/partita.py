@@ -30,6 +30,7 @@ TIMEOUT_BASH_MS = 900000
 VARIABILI_DA_NON_PASSARE = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
 ESPRESSIONE_LANCIO = re.compile(r"backgrounded · ([0-9a-f]{8}) · ")
 ATTESA_SERVIZIO_S = 60
+TIPI_SENZA_PROCESSO = ("umano", "sorgente")
 
 
 def adesso(precisione="seconds"):
@@ -116,6 +117,12 @@ class Partita:
                 percorso.touch()
 
     def registra(self, id_nodo, dati):
+        """Scrive la voce del nodo in nodi.json. Un nodo `umano` o `sorgente` del grafo non ha un
+        processo: registrarne uno vorrebbe dire che il bus scambia quel processo per l'umano, o per
+        un file, e lo timbra come mittente. La regia che ci prova è un errore, e si ferma qui."""
+        voce_grafo = libgrafo.nodo(self.grafo(), id_nodo)
+        if voce_grafo is not None and voce_grafo["tipo"] in TIPI_SENZA_PROCESSO:
+            raise ValueError(f"{id_nodo} è un nodo {voce_grafo['tipo']} del grafo: non ha un processo da registrare")
         nodi = self.nodi()
         nodi["nodi"][id_nodo] = dati
         scrivi_json(self.file_nodi, nodi)
