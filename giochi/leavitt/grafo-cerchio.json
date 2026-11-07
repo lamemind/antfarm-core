@@ -1,0 +1,34 @@
+{
+  "versione": 1,
+  "descrizione": "Leavitt in cerchio: A–B–C–D–E–A, ognuno scrive ai due vicini. In più la regia scrive a ognuno la sua carta e ognuno le scrive la dichiarazione.",
+  "nodi": [
+    {"id": "regia", "tipo": "script", "ruolo": "distribuisce le carte e riceve le dichiarazioni"},
+    {"id": "A", "tipo": "llm", "ruolo": "giocatore"},
+    {"id": "B", "tipo": "llm", "ruolo": "giocatore"},
+    {"id": "C", "tipo": "llm", "ruolo": "giocatore"},
+    {"id": "D", "tipo": "llm", "ruolo": "giocatore"},
+    {"id": "E", "tipo": "llm", "ruolo": "giocatore"}
+  ],
+  "archi": [
+    {"da": "regia", "a": "A", "diritti": ["conosce", "scrive"]},
+    {"da": "regia", "a": "B", "diritti": ["conosce", "scrive"]},
+    {"da": "regia", "a": "C", "diritti": ["conosce", "scrive"]},
+    {"da": "regia", "a": "D", "diritti": ["conosce", "scrive"]},
+    {"da": "regia", "a": "E", "diritti": ["conosce", "scrive"]},
+    {"da": "A", "a": "B", "diritti": ["conosce", "scrive"]},
+    {"da": "A", "a": "E", "diritti": ["conosce", "scrive"]},
+    {"da": "B", "a": "A", "diritti": ["conosce", "scrive"]},
+    {"da": "B", "a": "C", "diritti": ["conosce", "scrive"]},
+    {"da": "C", "a": "B", "diritti": ["conosce", "scrive"]},
+    {"da": "C", "a": "D", "diritti": ["conosce", "scrive"]},
+    {"da": "D", "a": "C", "diritti": ["conosce", "scrive"]},
+    {"da": "D", "a": "E", "diritti": ["conosce", "scrive"]},
+    {"da": "E", "a": "A", "diritti": ["conosce", "scrive"]},
+    {"da": "E", "a": "D", "diritti": ["conosce", "scrive"]},
+    {"da": "A", "a": "regia", "diritti": ["conosce", "scrive"]},
+    {"da": "B", "a": "regia", "diritti": ["conosce", "scrive"]},
+    {"da": "C", "a": "regia", "diritti": ["conosce", "scrive"]},
+    {"da": "D", "a": "regia", "diritti": ["conosce", "scrive"]},
+    {"da": "E", "a": "regia", "diritti": ["conosce", "scrive"]}
+  ]
+}
