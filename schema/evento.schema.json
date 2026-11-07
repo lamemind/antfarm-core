@@ -30,10 +30,10 @@
       "minLength": 1
     },
     "messaggio": {
-      "description": "Una riga del log dei messaggi. La chiave di un messaggio è partita + indice, perché un rifiuto ha id null.",
+      "description": "Una riga del log dei messaggi: un invio consegnato o rifiutato, una lettura, una scrittura in una sorgente. La chiave di un messaggio è partita + indice, perché un rifiuto ha id null.",
       "required": ["indice"],
       "properties": {
-        "tipo": {"enum": ["consegnato", "rifiutato", "letto"]},
+        "tipo": {"enum": ["consegnato", "rifiutato", "letto", "scritto"]},
         "indice": {
           "description": "Numero della riga nel log dei messaggi, da 1.",
           "type": "integer",
@@ -46,7 +46,7 @@
             "ts": {"$ref": "#/$defs/ts"},
             "partita": {"$ref": "#/$defs/partita"},
             "id": {"type": ["string", "null"]},
-            "esito": {"enum": ["consegnato", "rifiutato", "letto"]},
+            "esito": {"enum": ["consegnato", "rifiutato", "letto", "scritto"]},
             "motivo": {"type": ["string", "null"]},
             "da": {"type": ["string", "null"]},
             "a": {"type": ["string", "null"]},

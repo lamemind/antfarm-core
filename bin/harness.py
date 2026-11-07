@@ -22,7 +22,7 @@
 
 Tre classi di evento, schema in schema/evento.schema.json: sessione (partita-aperta,
 partita-chiusa, nodo-lanciato, nodo-chiuso, da meta.json e nodi.json), messaggio (consegnato,
-rifiutato, letto: le tre specie di riga del log dei messaggi), spawn. Ogni evento avvolge la riga
+rifiutato, letto, scritto: le quattro specie di riga del log dei messaggi), spawn. Ogni evento avvolge la riga
 sorgente intatta nel campo `riga`; partita-aperta porta meta.json e grafo.json della partita, e la
 vista disegna da lì. Le righe del log senza partita (mittente-ignoto) non diventano eventi: si
 contano, e il conteggio esce su stderr alla chiusura.
@@ -64,7 +64,8 @@ FILE_VISTA = {
     "/vista.css": ("vista.css", "text/css; charset=utf-8"),
 }
 # A parità di ts, l'ordine del ciclo di vita: lancio prima dei messaggi, chiusura dopo.
-PRIORITA_A_PARI_TS = {"nodo-lanciato": 0, "consegnato": 1, "rifiutato": 1, "letto": 1, "spawn": 1, "nodo-chiuso": 2}
+PRIORITA_A_PARI_TS = {"nodo-lanciato": 0, "consegnato": 1, "rifiutato": 1, "letto": 1, "scritto": 1, "spawn": 1,
+                      "nodo-chiuso": 2}
 
 
 # <editor-fold defaultstate="collapsed" desc="Sorgenti: file del motore → eventi">

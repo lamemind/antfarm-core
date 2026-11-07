@@ -8,6 +8,9 @@
 Controlla la forma contro schema/grafo.schema.json e la coerenza che lo schema non esprime:
 id dei nodi unici, estremi di ogni arco fra i nodi dichiarati, nessun arco da un nodo a sé
 stesso, nessuna coppia (da, a) ripetuta — i diritti di una coppia stanno in un arco solo.
+Per le sorgenti: il percorso è relativo e non esce dalla cartella della partita — niente path
+assoluto, niente `..` —, perché il raggio d'impatto di una partita è la sua cartella; e una
+sorgente non ha archi uscenti, perché non parla.
 
 Uso:  orchestra/bin/valida-grafo.py <grafo.json>
 Esce 2 su uso sbagliato o file illeggibile.
@@ -15,7 +18,7 @@ Esce 2 su uso sbagliato o file illeggibile.
 
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import jsonschema
 
@@ -30,17 +33,31 @@ def errori_di_forma(grafo):
         yield f"forma: {posizione}: {errore.message}"
 
 
+def errori_del_percorso(nodo):
+    """Il percorso di una sorgente: relativo e dentro la cartella della partita."""
+    percorso = PurePosixPath(nodo["percorso"])
+    if percorso.is_absolute():
+        yield f"sorgente {nodo['id']}: percorso assoluto, deve essere relativo alla cartella della partita: {percorso}"
+    if ".." in percorso.parts:
+        yield f"sorgente {nodo['id']}: il percorso contiene `..` ed esce dalla cartella della partita: {percorso}"
+
+
 def errori_di_coerenza(grafo):
-    visti = set()
+    visti, sorgenti = set(), set()
     for nodo in grafo["nodi"]:
         if nodo["id"] in visti:
             yield f"nodo ripetuto: {nodo['id']}"
         visti.add(nodo["id"])
+        if nodo["tipo"] == "sorgente":
+            sorgenti.add(nodo["id"])
+            yield from errori_del_percorso(nodo)
     coppie = set()
     for indice, arco in enumerate(grafo["archi"]):
         for estremo in ("da", "a"):
             if arco[estremo] not in visti:
                 yield f"archi/{indice}: '{estremo}' punta a un nodo inesistente: {arco[estremo]}"
+        if arco["da"] in sorgenti:
+            yield f"archi/{indice}: arco uscente dalla sorgente {arco['da']}: una sorgente non parla"
         if arco["da"] == arco["a"]:
             yield f"archi/{indice}: arco da {arco['da']} a sé stesso"
         coppia = (arco["da"], arco["a"])

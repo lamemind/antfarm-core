@@ -3,6 +3,8 @@
 
     bus send <destinatario> [testo...]   consegna un messaggio; senza testo lo legge da stdin
     bus recv [--attesa <secondi>]        aspetta bloccato il primo messaggio della propria casella
+    bus scrivi <sorgente> [testo...]     scrive il testo nel file della sorgente, sostituendone il
+                                         contenuto; senza testo lo legge da stdin
     bus vista                            stampa la propria vista del grafo, con la versione corrente
 
 Nessun comando accetta il mittente. Il bus lo ricava dalla discendenza dei processi: risale
@@ -10,11 +12,17 @@ Nessun comando accetta il mittente. Il bus lo ricava dalla discendenza dei proce
 — coppia (pid, starttime), scritta dalla regia al lancio — è il chiamante. Un chiamante che
 nessuna partita aperta ha registrato viene rifiutato con `mittente-ignoto`.
 
-Ogni invio, consegnato o rifiutato, e ogni lettura diventano una riga di registro/messaggi.jsonl.
-Il rifiuto per arco mancante porta il motivo `arco-negato`.
+Una sorgente è un nodo che non parla: un file, al `percorso` che il grafo dichiara relativo alla
+cartella della partita. Il diritto di scriverla è un arco `scrive` verso di lei, come per un
+messaggio: `scrivi` lo controlla allo stesso modo di `send`. `send` verso una sorgente e `scrivi`
+verso un nodo che non è una sorgente sono rifiutati con `tipo-errato`.
 
-Esce 0 se consegna o legge, 1 se rifiuta, 2 su uso sbagliato, 3 se recv non riceve niente
-entro l'attesa.
+Ogni invio, consegnato o rifiutato, ogni scrittura e ogni lettura diventano una riga di
+registro/messaggi.jsonl; la scrittura ha esito `scritto`. Motivi di rifiuto: `arco-negato`,
+`nodo-ignoto`, `mittente-ignoto`, `tipo-errato`.
+
+Esce 0 se consegna, scrive o legge, 1 se rifiuta, 2 su uso sbagliato, 3 se recv non riceve
+niente entro l'attesa.
 """
 
 import fcntl
@@ -168,30 +176,57 @@ def riga_rifiuto(rifiuto, partita, mittente, destinatario, versione, testo):
     }
 
 
+def testo_dagli_argomenti(argomenti):
+    testo = " ".join(argomenti[1:]) if len(argomenti) > 1 else sys.stdin.read()
+    return testo.strip()
+
+
+def autorizza(destinatario, verso_sorgente):
+    """Identifica il chiamante e controlla nodo, tipo e arco `scrive` verso il destinatario.
+    Restituisce (cartella della partita, mittente, grafo); solleva Rifiuto con partita, mittente
+    e versione già noti nei suoi attributi, per la riga del log."""
+    cartella_partita, mittente = identifica()
+    grafo = libgrafo.carica(cartella_partita / "grafo.json")
+    versione = grafo["versione"]
+    contesto = {"partita": cartella_partita.name, "mittente": mittente, "versione": versione}
+    nodo_destinatario = libgrafo.nodo(grafo, destinatario)
+    try:
+        if nodo_destinatario is None:
+            raise Rifiuto("nodo-ignoto", f"{destinatario} non è un nodo del grafo v{versione}")
+        e_sorgente = nodo_destinatario["tipo"] == "sorgente"
+        if verso_sorgente and not e_sorgente:
+            raise Rifiuto("tipo-errato", f"{destinatario} non è una sorgente: a un nodo si scrive con `bus send`")
+        if e_sorgente and not verso_sorgente:
+            raise Rifiuto("tipo-errato", f"{destinatario} è una sorgente, un file e non una casella: si scrive con `bus scrivi`")
+        if "scrive" not in libgrafo.diritti(grafo, mittente, destinatario):
+            raise Rifiuto("arco-negato", f"{mittente} non ha `scrive` verso {destinatario} nel grafo v{versione}")
+    except Rifiuto as rifiuto:
+        rifiuto.contesto = contesto
+        raise
+    return cartella_partita, mittente, grafo
+
+
+def rifiuta(rifiuto, destinatario, testo):
+    contesto = getattr(rifiuto, "contesto", {"partita": None, "mittente": None, "versione": None})
+    scrivi_log(riga_rifiuto(rifiuto, contesto["partita"], contesto["mittente"], destinatario, contesto["versione"], testo))
+    print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+    return 1
+
+
 def comando_send(argomenti):
     if not argomenti:
         print("uso: bus send <destinatario> [testo...]", file=sys.stderr)
         return 2
     destinatario = argomenti[0]
-    testo = " ".join(argomenti[1:]) if len(argomenti) > 1 else sys.stdin.read()
-    testo = testo.strip()
+    testo = testo_dagli_argomenti(argomenti)
     if not testo:
         print("testo vuoto: niente da consegnare", file=sys.stderr)
         return 2
-    partita, mittente, versione = None, None, None
     try:
-        cartella_partita, mittente = identifica()
-        partita = cartella_partita.name
-        grafo = libgrafo.carica(cartella_partita / "grafo.json")
-        versione = grafo["versione"]
-        if libgrafo.nodo(grafo, destinatario) is None:
-            raise Rifiuto("nodo-ignoto", f"{destinatario} non è un nodo del grafo v{versione}")
-        if "scrive" not in libgrafo.diritti(grafo, mittente, destinatario):
-            raise Rifiuto("arco-negato", f"{mittente} non ha `scrive` verso {destinatario} nel grafo v{versione}")
+        cartella_partita, mittente, grafo = autorizza(destinatario, verso_sorgente=False)
     except Rifiuto as rifiuto:
-        scrivi_log(riga_rifiuto(rifiuto, partita, mittente, destinatario, versione, testo))
-        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
-        return 1
+        return rifiuta(rifiuto, destinatario, testo)
+    partita, versione = cartella_partita.name, grafo["versione"]
     messaggio = {
         "ts": adesso(), "partita": partita, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "consegnato",
         "motivo": None, "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
@@ -200,6 +235,48 @@ def comando_send(argomenti):
     deposita(cartella_partita, messaggio)
     scrivi_log(messaggio)
     print(f"consegnato a {destinatario} · messaggio {messaggio['id']} · grafo v{versione}")
+    return 0
+
+
+def file_della_sorgente(cartella_partita, nodo_sorgente):
+    """Il file della sorgente, dentro la cartella della partita. Il validatore del grafo rifiuta
+    già un percorso assoluto o con `..`; il controllo qui copre un link simbolico che porti fuori."""
+    radice = cartella_partita.resolve()
+    percorso = (radice / nodo_sorgente["percorso"]).resolve()
+    if radice not in percorso.parents:
+        raise Rifiuto("tipo-errato", f"il percorso di {nodo_sorgente['id']} esce dalla cartella della partita")
+    return percorso
+
+
+def comando_scrivi(argomenti):
+    if not argomenti:
+        print("uso: bus scrivi <sorgente> [testo...]", file=sys.stderr)
+        return 2
+    sorgente = argomenti[0]
+    testo = testo_dagli_argomenti(argomenti)
+    if not testo:
+        print("testo vuoto: niente da scrivere", file=sys.stderr)
+        return 2
+    try:
+        cartella_partita, mittente, grafo = autorizza(sorgente, verso_sorgente=True)
+        try:
+            percorso = file_della_sorgente(cartella_partita, libgrafo.nodo(grafo, sorgente))
+        except Rifiuto as rifiuto:
+            rifiuto.contesto = {"partita": cartella_partita.name, "mittente": mittente, "versione": grafo["versione"]}
+            raise
+    except Rifiuto as rifiuto:
+        return rifiuta(rifiuto, sorgente, testo)
+    percorso.parent.mkdir(parents=True, exist_ok=True)
+    temporaneo = percorso.with_name(f".{percorso.name}.{uuid.uuid4().hex[:8]}")
+    temporaneo.write_text(testo + "\n", encoding="utf-8")
+    os.replace(temporaneo, percorso)
+    riga = {
+        "ts": adesso(), "partita": cartella_partita.name, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "scritto",
+        "motivo": None, "da": mittente, "a": sorgente, "versione": grafo["versione"], "testo": testo,
+        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+    }
+    scrivi_log(riga)
+    print(f"scritto in {sorgente} · {riga['id']} · grafo v{grafo['versione']}")
     return 0
 
 
@@ -251,7 +328,7 @@ def comando_vista(argomenti):
 
 
 def main():
-    comandi = {"send": comando_send, "recv": comando_recv, "vista": comando_vista}
+    comandi = {"send": comando_send, "recv": comando_recv, "scrivi": comando_scrivi, "vista": comando_vista}
     if len(sys.argv) < 2 or sys.argv[1] not in comandi:
         print(__doc__.strip(), file=sys.stderr)
         return 2

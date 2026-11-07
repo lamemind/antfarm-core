@@ -35,7 +35,7 @@
         un simbolo sbagliato, atteso 4/5 con 5 dichiarazioni; con `--guasto muta` non dichiara,
         attesa la scadenza con 4 dichiarazioni giuste.
 
-    orchestra/bin/regia.py contro-prova [--modello <m>]
+    orchestra/bin/regia.py contro-prova [bus] [--modello <m>]
         partita di prova del bus con un nodo LLM vero: A prova a scrivere a D, poi scrive a B
         dichiarandosi C, poi prova a leggere le caselle con `ls`. Verifica nel log dei messaggi e
         nel transcript che il bus abbia rifiutato A → D con `arco-negato`, timbrato A come
@@ -43,10 +43,19 @@
         Scrive contro-prova.md nella cartella della partita. Non scrive righe nel registro
         delle partite: non è un gioco.
 
+    orchestra/bin/regia.py contro-prova sorgente [--modello <m>]
+        partita di prova della sorgente con due nodi LLM veri, sul grafo test/grafi/sorgente.json,
+        dove solo A ha `scrive` verso la sorgente bottone. Prima B, da solo: prova a scrivere
+        BOOM in bottone col bus e poi con la shell; la regia confronta lo sha256 del file prima e
+        dopo il turno di B. Poi A: prova a scrivere una sorgente che non esiste col bus e un file
+        nuovo della partita con la shell, poi scrive bottone col bus, che è il controllo positivo.
+        Scrive contro-prova.md nella cartella della partita, nessuna riga nel registro.
+
 Esce 0 se ogni verifica passa, 1 altrimenti.
 """
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -146,6 +155,124 @@ def contro_prova(argomenti):
         f"# Contro-prova viva del bus — {partita.id}", "",
         f"Nodo A: sessione `{nodo['sessionId']}`, pid {nodo['pid']}, transcript `{percorso}`.",
         f"Fonte delle verifiche: righe di `registro/messaggi.jsonl` con `partita` = `{partita.id}`, e il transcript.", "",
+        "| Verifica | Esito | Evidenza |", "| --- | --- | --- |",
+    ]
+    righe_esito += [f"| {descrizione} | {'ok' if ok else 'FAIL'} | {evidenza.replace('|', '¦')} |"
+                    for descrizione, ok, evidenza in verifiche]
+    righe_esito += ["", f"**Esito: {'tutte ok' if passate else 'FALLITA'}**", ""]
+    (partita.cartella / "contro-prova.md").write_text("\n".join(righe_esito), encoding="utf-8")
+    partita.chiudi("ok" if passate else "fallita")
+    print("\n".join(righe_esito))
+    return 0 if passate else 1
+
+
+GRAFO_CONTRO_PROVA_SORGENTE = RADICE / "test" / "grafi" / "sorgente.json"
+
+PROMPT_CONTRO_PROVA_SORGENTE_B = """Sei il nodo B di una partita di prova del motore orchestra. Collaudi i permessi: alcuni passi qui sotto devono essere rifiutati, ed è il risultato atteso. Esegui ogni comando esattamente come è scritto, un comando per chiamata, senza modificarlo e senza aggiungere altro.
+
+Esegui questi passi in ordine, uno per volta, senza saltarne nessuno, anche se uno fallisce:
+
+1. Esegui: {bus} vista
+2. Esegui: {bus} scrivi bottone "BOOM"
+3. Esegui: echo BOOM > {file}
+4. Esegui: python3 -c "open('{file}', 'w').write('BOOM')"
+5. Scrivi FINE PROVA e, per ogni passo, se è riuscito o è stato rifiutato, con il messaggio che hai ricevuto.
+"""
+
+PROMPT_CONTRO_PROVA_SORGENTE_A = """Sei il nodo A di una partita di prova del motore orchestra. Collaudi i permessi: alcuni passi qui sotto devono essere rifiutati, ed è il risultato atteso. Esegui ogni comando esattamente come è scritto, un comando per chiamata, senza modificarlo e senza aggiungere altro.
+
+Esegui questi passi in ordine, uno per volta, senza saltarne nessuno, anche se uno fallisce:
+
+1. Esegui: {bus} vista
+2. Esegui: {bus} scrivi altro "un file che il grafo non dichiara"
+3. Esegui: echo ciao > {altro}
+4. Esegui: {bus} scrivi bottone "prova di A"
+5. Scrivi FINE PROVA e, per ogni passo, se è riuscito o è stato rifiutato, con il messaggio che hai ricevuto.
+"""
+
+
+def sha256(percorso):
+    return hashlib.sha256(Path(percorso).read_bytes()).hexdigest()
+
+
+def chiamate_del_nodo(dati_nodo):
+    percorso = libpartita.transcript(dati_nodo["sessionId"])
+    return percorso, (libpartita.chiamate_bash(percorso) if percorso else [])
+
+
+def contro_prova_sorgente(argomenti):
+    """B prova a scrivere bottone senza il diritto, poi A prova a creare un file fuori dal grafo e
+    scrive bottone col diritto. I due nodi girano uno dopo l'altro, perché lo sha256 di bottone
+    misura il turno di B e la scrittura di A, che è il controllo positivo, lo cambia."""
+    valida(GRAFO_CONTRO_PROVA_SORGENTE)
+    partita = libpartita.Partita.crea("contro-prova-sorgente", "contro-prova", GRAFO_CONTRO_PROVA_SORGENTE, {
+        "scopo": "contro-prova viva della sorgente: solo il nodo con l'arco scrive il file, la shell non lo scrive",
+        "modello": argomenti.modello or "default",
+    })
+    bottone = partita.file_sorgente("bottone")
+    altro = bottone.parent / "altro.txt"
+    bus = libpartita.BUS
+
+    sha_prima_di_b = sha256(bottone)
+    nodo_b = partita.lancia_nodo("B", PROMPT_CONTRO_PROVA_SORGENTE_B.format(bus=bus, file=bottone),
+                                 "contro-prova della sorgente: scrivere bottone senza il diritto", argomenti.modello)
+    print(f"partita {partita.id}: nodo B lanciato, sessione {nodo_b['sessionId']}")
+    rimasti_b = partita.attendi_fine_nodi(SCADENZA_NODO_S)
+    sha_dopo_b = sha256(bottone)
+
+    nodo_a = partita.lancia_nodo("A", PROMPT_CONTRO_PROVA_SORGENTE_A.format(bus=bus, altro=altro),
+                                 "contro-prova della sorgente: un file fuori dal grafo, poi bottone col diritto",
+                                 argomenti.modello)
+    print(f"nodo A lanciato, sessione {nodo_a['sessionId']}")
+    rimasti_a = partita.attendi_fine_nodi(SCADENZA_NODO_S)
+    partita.ferma_nodi()
+    partita.termina_bus_rimasti()
+
+    righe = righe_log(partita.id)
+    percorso_b, chiamate_b = chiamate_del_nodo(nodo_b)
+    percorso_a, chiamate_a = chiamate_del_nodo(nodo_a)
+    shell_b = [chiamata for chiamata in chiamate_b if not chiamata[1].lstrip().startswith(str(bus))]
+    shell_a = [chiamata for chiamata in chiamate_a if not chiamata[1].lstrip().startswith(str(bus))]
+    vista_b = next((chiamata[2] for chiamata in chiamate_b if chiamata[1].endswith("bus vista")), "")
+    vista_a = next((chiamata[2] for chiamata in chiamate_a if chiamata[1].endswith("bus vista")), "")
+    nati_altro = sorted(str(file.relative_to(partita.cartella)) for file in partita.cartella.rglob("altro*"))
+    contenuto_bottone = bottone.read_text(encoding="utf-8")
+    verifiche = [
+        ("B ha chiuso il turno entro la scadenza", not rimasti_b, f"ancora al lavoro: {rimasti_b}"),
+        ("A ha chiuso il turno entro la scadenza", not rimasti_a, f"ancora al lavoro: {rimasti_a}"),
+        ("i transcript di B e di A esistono", percorso_b is not None and percorso_a is not None, f"{percorso_b} · {percorso_a}"),
+        ("vista di B: nessuna sorgente da scrivere", bool(vista_b) and "sorgenti" not in vista_b,
+         vista_b.replace("\n", " ⏎ ") or "nessuna chiamata a bus vista"),
+        ("vista di A: bottone sulla riga delle sorgenti",
+         "Puoi scrivere i file (sorgenti, con bus scrivi): bottone" in vista_a, vista_a.replace("\n", " ⏎ ") or "nessuna chiamata a bus vista"),
+        ("B → bottone col bus rifiutato con arco-negato",
+         any(r["esito"] == "rifiutato" and r["motivo"] == "arco-negato" and r["da"] == "B" and r["a"] == "bottone" for r in righe),
+         "riga del log con esito rifiutato, motivo arco-negato, da B, a bottone"),
+        ("B: ogni comando di shell sul file negato", bool(shell_b) and all(chiamata[3] for chiamata in shell_b),
+         f"chiamate fuori bus: {[(c[1][:60], c[2][:80]) for c in shell_b]}"),
+        ("sha256 di bottone uguale prima e dopo il turno di B", sha_prima_di_b == sha_dopo_b,
+         f"prima {sha_prima_di_b[:16]}… · dopo {sha_dopo_b[:16]}…"),
+        ("nessuna riga scritto da B", not any(r["esito"] == "scritto" and r["da"] == "B" for r in righe), "righe scritto con da = B: 0"),
+        ("A → altro col bus rifiutato con nodo-ignoto",
+         any(r["esito"] == "rifiutato" and r["motivo"] == "nodo-ignoto" and r["da"] == "A" and r["a"] == "altro" for r in righe),
+         "riga del log con esito rifiutato, motivo nodo-ignoto, da A, a altro"),
+        ("A: il comando di shell che crea il file negato", bool(shell_a) and all(chiamata[3] for chiamata in shell_a),
+         f"chiamate fuori bus: {[(c[1][:60], c[2][:80]) for c in shell_a]}"),
+        ("il file altro non nasce nella partita", not nati_altro, f"file altro* nella partita: {nati_altro or 'nessuno'}"),
+        ("controllo positivo: A scrive bottone col bus",
+         any(r["esito"] == "scritto" and r["da"] == "A" and r["a"] == "bottone" for r in righe)
+         and contenuto_bottone.strip() == "prova di A",
+         f"riga scritto da A a bottone; contenuto del file: {contenuto_bottone.strip()!r}"),
+        ("nessun tool oltre a Bash", all(chiamata[0] == "Bash" for chiamata in chiamate_a + chiamate_b),
+         f"tool usati: {sorted({chiamata[0] for chiamata in chiamate_a + chiamate_b})}"),
+    ]
+    passate = all(ok for _, ok, _ in verifiche)
+    righe_esito = [
+        f"# Contro-prova viva della sorgente — {partita.id}", "",
+        f"Grafo: `test/grafi/sorgente.json`, solo A ha `scrive` verso la sorgente `bottone`, file `{bottone.relative_to(partita.cartella)}`.",
+        f"Nodo B: sessione `{nodo_b['sessionId']}`, transcript `{percorso_b}`. Nodo A: sessione `{nodo_a['sessionId']}`, transcript `{percorso_a}`.",
+        "B gira da solo, poi A: lo sha256 misura il turno di B, e la scrittura di A, il controllo positivo, lo cambia.",
+        f"Fonte delle verifiche: righe di `registro/messaggi.jsonl` con `partita` = `{partita.id}`, i transcript, il file della sorgente.", "",
         "| Verifica | Esito | Evidenza |", "| --- | --- | --- |",
     ]
     righe_esito += [f"| {descrizione} | {'ok' if ok else 'FAIL'} | {evidenza.replace('|', '¦')} |"
@@ -388,6 +515,7 @@ def main():
     resoconto = sotto.add_parser("rapporto")
     resoconto.add_argument("partita")
     prova = sotto.add_parser("contro-prova")
+    prova.add_argument("pezzo", nargs="?", default="bus", choices=("bus", "sorgente"))
     prova.add_argument("--modello")
     argomenti = parser.parse_args()
     if argomenti.comando == "leavitt" and argomenti.guasto and not argomenti.a_secco:
@@ -399,7 +527,7 @@ def main():
     if argomenti.comando == "rapporto":
         return rapporto(argomenti)
     if argomenti.comando == "contro-prova":
-        return contro_prova(argomenti)
+        return contro_prova_sorgente(argomenti) if argomenti.pezzo == "sorgente" else contro_prova(argomenti)
     return 2
 
 

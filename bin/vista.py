@@ -2,8 +2,10 @@
 """Vista per agente: dal grafo di accesso il testo che un nodo riceve, e nient'altro.
 
 Porta la versione del grafo, gli archi uscenti del nodo coi loro diritti e, per ogni diritto,
-i nodi verso cui il nodo lo ha. Gli archi entranti non ci sono: sapere chi ti scrive non è un
-diritto, e il grafo intero non arriva a nessun agente.
+i nodi verso cui il nodo lo ha. Una sorgente — un file, un nodo che non parla — verso cui il nodo
+ha `scrive` sta su una riga sua e non fra i nodi a cui scrivere, perché non ha una casella: la si
+scrive con `bus scrivi`, non con `bus send`. Gli archi entranti non ci sono: sapere chi ti scrive
+non è un diritto, e il grafo intero non arriva a nessun agente.
 
 Uso:  orchestra/bin/vista.py <grafo.json> <nodo> [--json]
 Esce 1 se il nodo non è nel grafo, 2 su uso sbagliato.
@@ -16,11 +18,13 @@ import grafo as libgrafo
 
 
 def vista(grafo, id_nodo):
+    archi = libgrafo.archi_uscenti(grafo, id_nodo)
     return {
         "nodo": id_nodo,
         "versione": grafo["versione"],
-        "archi": [{"a": arco["a"], "diritti": arco["diritti"]} for arco in libgrafo.archi_uscenti(grafo, id_nodo)],
+        "archi": [{"a": arco["a"], "diritti": arco["diritti"]} for arco in archi],
         "diritti": {diritto: libgrafo.destinatari(grafo, id_nodo, diritto) for diritto in libgrafo.DIRITTI},
+        "sorgenti": [arco["a"] for arco in archi if (libgrafo.nodo(grafo, arco["a"]) or {}).get("tipo") == "sorgente"],
     }
 
 
@@ -38,9 +42,15 @@ def come_testo(dati):
         "modifica": "Puoi modificare gli archi intorno a",
         "spawn": "Puoi spawnare da",
     }
+    sorgenti = dati.get("sorgenti", [])
     for diritto in libgrafo.DIRITTI:
         nodi = dati["diritti"][diritto]
+        if diritto == "scrive":
+            nodi = [nodo for nodo in nodi if nodo not in sorgenti]
         righe.append(f"{etichette[diritto]}: {', '.join(nodi) if nodi else '(nessuno)'}")
+    scrivibili = [sorgente for sorgente in sorgenti if sorgente in dati["diritti"]["scrive"]]
+    if scrivibili:
+        righe.append(f"Puoi scrivere i file (sorgenti, con bus scrivi): {', '.join(scrivibili)}")
     return "\n".join(righe)
 
 

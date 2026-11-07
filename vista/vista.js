@@ -3,9 +3,11 @@
 // Il grafo arriva dentro l'evento partita-aperta (riga.grafo) e si disegna da lì: nodi su un
 // cerchio nell'ordine del file, archi come curve orientate. Un messaggio consegnato è un pallino
 // che corre lungo l'arco da → a e resta fermo, acceso, sul nodo destinatario; la lettura lo
-// spegne ma non lo toglie. Un rifiuto è un segno fermo sul nodo mittente: non ha un arco su cui
-// correre. Ogni pallino e ogni segno porta l'evento grezzo nell'attributo data-evento, e il clic
-// lo mostra così com'è arrivato. La pagina non scrive niente verso l'harness.
+// spegne ma non lo toglie. Una scrittura in una sorgente è un pallino uguale, verde, che corre
+// verso la sorgente e porta data-esito="scritto": nessuno la legge, quindi resta acceso. Un rifiuto
+// è un segno fermo sul nodo mittente: non ha un arco su cui correre. Ogni pallino e ogni segno
+// porta l'evento grezzo nell'attributo data-evento, e il clic lo mostra così com'è arrivato. La
+// pagina non scrive niente verso l'harness.
 
 "use strict";
 
@@ -225,13 +227,14 @@ function pallinoConsegnato(evento) {
   const riga = evento.riga;
   const arco = stato.archi.get(chiaveArco(riga.da, riga.a));
   const pallino = elementoSvg("circle", {
-    class: "pallino",
+    class: evento.tipo === "scritto" ? "pallino scritto" : "pallino",
     r: 7,
     "data-pallino": `${evento.partita}:${evento.indice}`,
-    "data-esito": "consegnato",
+    "data-esito": evento.tipo,
     "data-evento": JSON.stringify(evento),
   });
-  pallino.addEventListener("click", () => mostra(`messaggio · ${riga.da} → ${riga.a}`, JSON.parse(pallino.dataset.evento), pallino));
+  const genere = evento.tipo === "scritto" ? "scrittura" : "messaggio";
+  pallino.addEventListener("click", () => mostra(`${genere} · ${riga.da} → ${riga.a}`, JSON.parse(pallino.dataset.evento), pallino));
   strati.pallini.append(pallino);
   if (riga.id) stato.pallini.set(riga.id, pallino);
   if (!arco) {
@@ -300,7 +303,7 @@ function gestisci(evento) {
     return;
   }
   if (evento.classe === "messaggio") {
-    if (evento.tipo === "consegnato") pallinoConsegnato(evento);
+    if (evento.tipo === "consegnato" || evento.tipo === "scritto") pallinoConsegnato(evento);
     else if (evento.tipo === "rifiutato") segnoRifiuto(evento);
     else if (evento.tipo === "letto") lettura(evento);
     return;

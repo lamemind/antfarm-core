@@ -114,6 +114,57 @@ sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 come_nodo A "$BUS" send B "a partita chiusa"
 verifica "partita chiusa: anche un nodo registrato è rifiutato" test $? -ne 0
 
+echo "sorgente: validatore"
+GRAFI="$ORCHESTRA/test/grafi"
+verifica "grafo con la sorgente bottone valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFI/sorgente.json"
+for invalido in sorgente-percorso-assoluto sorgente-percorso-fuori sorgente-senza-percorso sorgente-che-parla percorso-su-nodo-llm; do
+  verifica "$invalido → ≠0" bash -c "! '$TMP/bin/valida-grafo.py' '$GRAFI/$invalido.json'"
+done
+
+echo "sorgente: vista"
+VISTA_A=$("$TMP/bin/vista.py" "$GRAFI/sorgente.json" A)
+VISTA_SB=$("$TMP/bin/vista.py" "$GRAFI/sorgente.json" B)
+verifica "vista di A: la sorgente non sta fra i nodi a cui scrivere" grep -qx 'Puoi scrivere a: B' <<< "$VISTA_A"
+verifica "vista di A: bottone sulla riga delle sorgenti" \
+  grep -qx 'Puoi scrivere i file (sorgenti, con bus scrivi): bottone' <<< "$VISTA_A"
+verifica "vista di B: nessuna riga delle sorgenti" bash -c "! grep -q 'sorgenti' <<< '$VISTA_SB'"
+
+echo "sorgente: bus scrivi"
+PARTITA="$TMP/partite/prova-sorgente"
+mkdir -p "$PARTITA/bottone"
+cp "$GRAFI/sorgente.json" "$PARTITA/grafo.json"
+printf '{"partita": "prova-sorgente", "stato": "aperta", "nodi": {}}\n' > "$PARTITA/nodi.json"
+BOTTONE="$PARTITA/bottone/bottone.txt"
+: > "$BOTTONE"
+SHA_PRIMA=$(sha256sum "$BOTTONE" | cut -d' ' -f1)
+come_nodo B "$BUS" scrivi bottone BOOM
+codice_b=$?
+verifica "B scrivi bottone esce ≠0" test "$codice_b" -ne 0
+verifica "B scrivi bottone: riga arco-negato nel log, da B a bottone" \
+  jq -e -s 'any(.[]; .partita=="prova-sorgente" and .esito=="rifiutato" and .motivo=="arco-negato" and .da=="B" and .a=="bottone")' "$LOG"
+verifica "B scrivi bottone: sha256 del file uguale prima e dopo" test "$(sha256sum "$BOTTONE" | cut -d' ' -f1)" = "$SHA_PRIMA"
+come_nodo A "$BUS" scrivi altro ciao
+verifica "A scrivi verso un nodo fuori dal grafo → nodo-ignoto" \
+  jq -e -s 'any(.[]; .partita=="prova-sorgente" and .motivo=="nodo-ignoto" and .da=="A" and .a=="altro")' "$LOG"
+verifica "A scrivi altro: nessun file nuovo nella partita" \
+  test -z "$(find "$PARTITA" -name 'altro*' -print -quit)"
+come_nodo A "$BUS" scrivi B "a un nodo"
+verifica "A scrivi verso un nodo che non è una sorgente → tipo-errato" \
+  jq -e -s 'any(.[]; .partita=="prova-sorgente" and .motivo=="tipo-errato" and .da=="A" and .a=="B")' "$LOG"
+come_nodo A "$BUS" send bottone "un messaggio al file"
+verifica "A send verso la sorgente → tipo-errato, nessuna casella" \
+  bash -c "jq -e -s 'any(.[]; .partita==\"prova-sorgente\" and .motivo==\"tipo-errato\" and .da==\"A\" and .a==\"bottone\")' '$LOG' && test ! -e '$PARTITA/caselle/bottone'"
+verifica "dopo i rifiuti il file è ancora intatto" test "$(sha256sum "$BOTTONE" | cut -d' ' -f1)" = "$SHA_PRIMA"
+come_nodo A "$BUS" scrivi bottone BOOM
+verifica "A scrivi bottone esce 0" test $? -eq 0
+verifica "A scrivi bottone: riga scritto nel log, da A a bottone, testo BOOM" \
+  jq -e -s 'any(.[]; .partita=="prova-sorgente" and .esito=="scritto" and .da=="A" and .a=="bottone" and .testo=="BOOM" and (.id|startswith("m-")))' "$LOG"
+verifica "A scrivi bottone: il file porta BOOM" grep -qx BOOM "$BOTTONE"
+jq -c 'select(.partita=="prova-sorgente" and .esito=="scritto") | {classe: "messaggio", tipo: .esito, ts, partita, indice: 1, riga: .}' \
+  "$LOG" > "$TMP/scritto.jsonl"
+verifica "evento messaggio/scritto dalla riga del log → valido" "$TMP/bin/valida-eventi.py" "$TMP/scritto.jsonl"
+sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
+
 echo "oracolo del telefono"
 ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'
 import json, sys

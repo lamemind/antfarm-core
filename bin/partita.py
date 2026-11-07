@@ -78,13 +78,15 @@ class Partita:
 
     @classmethod
     def crea(cls, nome, gioco, grafo_sorgente, meta):
-        """Cartella nuova sotto partite/, grafo copiato e già validato dal chiamante, regia registrata."""
+        """Cartella nuova sotto partite/, grafo copiato e già validato dal chiamante, file delle
+        sorgenti creati vuoti, regia registrata."""
         stampo = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         cartella = PARTITE / f"{stampo}-{nome}"
         (cartella / "caselle").mkdir(parents=True)
         (cartella / "nodi").mkdir()
         shutil.copyfile(grafo_sorgente, cartella / "grafo.json")
         partita = cls(cartella)
+        partita.prepara_sorgenti()
         scrivi_json(partita.file_meta, {"partita": partita.id, "gioco": gioco, "inizio": adesso(), **meta})
         scrivi_json(partita.file_nodi, {
             "partita": partita.id,
@@ -99,6 +101,19 @@ class Partita:
             },
         })
         return partita
+
+    def file_sorgente(self, id_sorgente):
+        """Il file di una sorgente del grafo, al suo percorso relativo alla cartella della partita."""
+        return self.cartella / libgrafo.nodo(self.grafo(), id_sorgente)["percorso"]
+
+    def prepara_sorgenti(self):
+        """Crea vuoto il file di ogni sorgente del grafo: esiste prima di ogni scrittura, quindi
+        lo sha256 di partenza e l'oracolo che lo legge hanno sempre un file su cui lavorare."""
+        for nodo in self.grafo()["nodi"]:
+            if nodo["tipo"] == "sorgente":
+                percorso = self.file_sorgente(nodo["id"])
+                percorso.parent.mkdir(parents=True, exist_ok=True)
+                percorso.touch()
 
     def registra(self, id_nodo, dati):
         nodi = self.nodi()

@@ -111,6 +111,7 @@ aside section { padding: 12px 16px; min-height: 0; }
   cursor: pointer;
   filter: drop-shadow(0 0 5px var(--pallino)) drop-shadow(0 0 10px var(--pallino));
 }
+.pallino.scritto { fill: var(--nodo-sorgente); filter: drop-shadow(0 0 5px var(--nodo-sorgente)) drop-shadow(0 0 10px var(--nodo-sorgente)); }
 .pallino.spento { fill: var(--pallino-spento); filter: none; }
 .pallino.selezionato { stroke: var(--selezione); stroke-width: 2; }
 

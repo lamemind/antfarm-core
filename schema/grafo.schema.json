@@ -38,8 +38,16 @@
           "description": "llm: una sessione di agente · script: un processo deterministico · umano: la persona · sorgente: un nodo che non parla",
           "enum": ["llm", "script", "umano", "sorgente"]
         },
-        "ruolo": {"type": "string"}
-      }
+        "ruolo": {"type": "string"},
+        "percorso": {
+          "description": "Solo per una sorgente: il file che la sorgente è, relativo alla cartella della partita. Chi ha `scrive` verso la sorgente lo scrive con `bus scrivi`. Assoluto o con `..` lo rifiuta valida-grafo.py.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {"properties": {"tipo": {"const": "sorgente"}}, "required": ["tipo"]},
+      "then": {"required": ["percorso"]},
+      "else": {"not": {"required": ["percorso"]}}
     },
     "arco": {
       "type": "object",
