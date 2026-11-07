@@ -12,8 +12,9 @@
         regia, bus e oracolo senza LLM, e non scrive nel registro delle partite.
 
     orchestra/bin/regia.py rapporto <cartella della partita>
-        riscrive rapporto.md di una partita chiusa del telefono dalle sue tre fonti: la riga del
-        registro delle partite, le righe del log dei messaggi, i transcript dei nodi. Lo stesso
+        riscrive rapporto.md di una partita chiusa del telefono o di Leavitt dalle sue fonti: la
+        riga del registro delle partite, le righe del log dei messaggi, i transcript dei nodi, e
+        per Leavitt meta.json e carte.json. Il gioco lo dice `gioco` in meta.json. Lo stesso
         rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
 
     orchestra/bin/regia.py leavitt --topologia ruota|catena|cerchio|completo [--seme <n>] [--modello <m>]
@@ -25,8 +26,9 @@
         della partita superano il tetto (default 400.000). Ferma i nodi, chiama l'oracolo sul log
         dei messaggi, osserva le sessioni, scrive la riga nel registro delle partite e chiude.
         Scrive nella cartella della partita carte.json e oracolo.json, e con le sessioni
-        osservazione.json. Con le sessioni esce 0 se la partita chiude con i controlli di
-        osservabilità passati e 0 turni umani: l'esito, dichiarazioni giuste su 5, è una misura
+        osservazione.json e rapporto.md (`giochi/leavitt/rapporto.py`). Con le sessioni esce 0 se
+        la partita chiude con i controlli di osservabilità passati e 0 turni umani: l'esito,
+        dichiarazioni giuste su 5, è una misura
         del gioco e non decide l'uscita. `--a-secco` usa nodi script che si mandano le carte per
         inondazione e dichiarano il simbolo comune, non scrive nel registro delle partite, ed
         esce 0 se l'esito è quello atteso: 5/5; con `--guasto sbagliata` il nodo guasto dichiara
@@ -57,6 +59,7 @@ sys.path.insert(2, str(Path(__file__).resolve().parent.parent))
 import fatti as libfatti  # noqa: E402
 import giochi.leavitt.carte as leavitt_carte  # noqa: E402
 import giochi.leavitt.gioco as leavitt_gioco  # noqa: E402
+import giochi.leavitt.rapporto as leavitt_rapporto  # noqa: E402
 import gioco as telefono_gioco  # noqa: E402
 import grafo as libgrafo  # noqa: E402
 import osserva as libosserva  # noqa: E402
@@ -75,7 +78,7 @@ SCADENZA_PARTITA_S = 1800
 SCADENZA_CHIUSURA_NODI_S = 300
 SCADENZA_LEAVITT_S = 900
 TETTO_TOKEN_LEAVITT = 400000
-PASSO_CONTROLLO_TOKEN_S = 15
+PASSO_CONTROLLO_TOKEN_S = 5
 
 
 def valida(percorso_grafo):
@@ -226,10 +229,12 @@ def telefono(argomenti):
 
 def rapporto(argomenti):
     cartella = Path(argomenti.partita).resolve()
-    if not (cartella / "fatti.json").is_file():
-        raise SystemExit(f"non è la cartella di una partita del telefono: {cartella}")
+    gioco = json.loads((cartella / "meta.json").read_text(encoding="utf-8")).get("gioco") if (cartella / "meta.json").is_file() else None
+    scrittori = {"telefono": telefono_rapporto.scrivi, "leavitt": leavitt_rapporto.scrivi}
+    if gioco not in scrittori:
+        raise SystemExit(f"non è la cartella di una partita di un gioco ({', '.join(scrittori)}): {cartella}")
     osservazione = libosserva.osserva(cartella)
-    percorso = telefono_rapporto.scrivi(cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+    percorso = scrittori[gioco](cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
     print(f"rapporto: {percorso}")
     return 0
 # </editor-fold>
@@ -345,6 +350,8 @@ def leavitt(argomenti):
         })
         riuscita = osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
         print(libosserva.come_testo(osservazione))
+        percorso = leavitt_rapporto.scrivi(partita.cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+        print(f"rapporto: {percorso}")
     partita.chiudi(esito["esito"])
     for voce in esito["per_nodo"]:
         if voce.get("mancante"):
