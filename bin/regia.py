@@ -16,6 +16,23 @@
         registro delle partite, le righe del log dei messaggi, i transcript dei nodi. Lo stesso
         rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
 
+    orchestra/bin/regia.py leavitt --topologia ruota|catena|cerchio|completo [--seme <n>] [--modello <m>]
+                           [--scadenza <s>] [--tetto-token <n>]
+    orchestra/bin/regia.py leavitt --topologia … --a-secco [--guasto sbagliata|muta [--nodo-guasto X]]
+        gioco di Leavitt: valida il grafo della topologia, genera le carte dal seme, lancia A–E,
+        manda a ognuno la sua carta, poi riceve finché cinque nodi diversi hanno scritto alla
+        regia, oppure alla scadenza (default 900 s), oppure — con le sessioni — quando i token
+        della partita superano il tetto (default 400.000). Ferma i nodi, chiama l'oracolo sul log
+        dei messaggi, osserva le sessioni, scrive la riga nel registro delle partite e chiude.
+        Scrive nella cartella della partita carte.json e oracolo.json, e con le sessioni
+        osservazione.json. Con le sessioni esce 0 se la partita chiude con i controlli di
+        osservabilità passati e 0 turni umani: l'esito, dichiarazioni giuste su 5, è una misura
+        del gioco e non decide l'uscita. `--a-secco` usa nodi script che si mandano le carte per
+        inondazione e dichiarano il simbolo comune, non scrive nel registro delle partite, ed
+        esce 0 se l'esito è quello atteso: 5/5; con `--guasto sbagliata` il nodo guasto dichiara
+        un simbolo sbagliato, atteso 4/5 con 5 dichiarazioni; con `--guasto muta` non dichiara,
+        attesa la scadenza con 4 dichiarazioni giuste.
+
     orchestra/bin/regia.py contro-prova [--modello <m>]
         partita di prova del bus con un nodo LLM vero: A prova a scrivere a D, poi scrive a B
         dichiarandosi C, poi prova a leggere le caselle con `ls`. Verifica nel log dei messaggi e
@@ -31,11 +48,15 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "giochi" / "telefono"))
+sys.path.insert(2, str(Path(__file__).resolve().parent.parent))
 import fatti as libfatti  # noqa: E402
+import giochi.leavitt.carte as leavitt_carte  # noqa: E402
+import giochi.leavitt.gioco as leavitt_gioco  # noqa: E402
 import gioco as telefono_gioco  # noqa: E402
 import grafo as libgrafo  # noqa: E402
 import osserva as libosserva  # noqa: E402
@@ -48,9 +69,13 @@ VALIDATORE = RADICE / "bin" / "valida-grafo.py"
 LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
 GRAFO_TELEFONO = RADICE / "giochi" / "telefono" / "grafo.json"
 NODO_INOLTRO = RADICE / "giochi" / "telefono" / "nodo-inoltro.py"
+NODO_SCAMBIO = RADICE / "giochi" / "leavitt" / "nodo-scambio.py"
 SCADENZA_NODO_S = 600
 SCADENZA_PARTITA_S = 1800
 SCADENZA_CHIUSURA_NODI_S = 300
+SCADENZA_LEAVITT_S = 900
+TETTO_TOKEN_LEAVITT = 400000
+PASSO_CONTROLLO_TOKEN_S = 15
 
 
 def valida(percorso_grafo):
@@ -210,6 +235,131 @@ def rapporto(argomenti):
 # </editor-fold>
 
 
+# <editor-fold defaultstate="collapsed" desc="Leavitt">
+def token_correnti(cartella):
+    """I token della partita dai transcript, a partita in corso; None se un transcript ha l'ultima
+    riga scritta a metà, e il controllo si ripete al passo dopo."""
+    try:
+        return libosserva.osserva(cartella)["token"]
+    except json.JSONDecodeError:
+        return None
+
+
+def attendi_dichiarazioni(partita, scadenza_s, tetto_token):
+    """Riceve i messaggi alla regia finché cinque nodi diversi le hanno scritto. Restituisce come si
+    è chiusa l'attesa — `cinque-dichiarazioni`, `scadenza`, `tetto-token` — e i nodi che hanno
+    scritto, in ordine d'arrivo. Con tetto_token None i token non si controllano."""
+    limite = time.monotonic() + scadenza_s
+    prossimo_controllo = time.monotonic() + PASSO_CONTROLLO_TOKEN_S
+    dichiarati = []
+    while len(dichiarati) < len(leavitt_gioco.NODI):
+        restante = limite - time.monotonic()
+        if restante <= 0:
+            return "scadenza", dichiarati
+        arrivo = libpartita.ricevi(min(restante, PASSO_CONTROLLO_TOKEN_S))
+        if arrivo:
+            mittente, _, testo = arrivo
+            prima = mittente not in dichiarati
+            if prima:
+                dichiarati.append(mittente)
+            print(f"  {'dichiarazione' if prima else 'messaggio successivo'} da {mittente}: {testo[:80]}")
+        if tetto_token is not None and time.monotonic() >= prossimo_controllo:
+            token = token_correnti(partita.cartella)
+            if token is not None and token > tetto_token:
+                print(f"  {token} token, oltre il tetto di {tetto_token}: la partita chiude")
+                return "tetto-token", dichiarati
+            prossimo_controllo = time.monotonic() + PASSO_CONTROLLO_TOKEN_S
+    return "cinque-dichiarazioni", dichiarati
+
+
+def atteso_a_secco(argomenti, esito):
+    """La partita a secco chiude come il guasto prevede."""
+    if argomenti.guasto is None:
+        return esito["chiusura"] == "cinque-dichiarazioni" and esito["giuste"] == len(leavitt_gioco.NODI)
+    guasto = next(voce for voce in esito["per_nodo"] if voce["nodo"] == argomenti.nodo_guasto)
+    if argomenti.guasto == "sbagliata":
+        return (esito["chiusura"] == "cinque-dichiarazioni" and esito["dichiarazioni"] == 5
+                and esito["giuste"] == 4 and guasto.get("valore") == "sbagliata")
+    return (esito["chiusura"] == "scadenza" and esito["dichiarazioni"] == 4 and esito["giuste"] == 4
+            and esito["mancanti"] == [argomenti.nodo_guasto])
+
+
+def leavitt(argomenti):
+    percorso_grafo = leavitt_gioco.grafo(argomenti.topologia)
+    valida(percorso_grafo)
+    dati_carte = leavitt_carte.genera(argomenti.seme)
+    variante = "-".join(filter(None, [argomenti.topologia, "a-secco" if argomenti.a_secco else None, argomenti.guasto]))
+    partita = libpartita.Partita.crea(f"leavitt-{variante}", "leavitt", percorso_grafo, {
+        "topologia": argomenti.topologia, "a_secco": argomenti.a_secco, "guasto": argomenti.guasto,
+        "nodo_guasto": argomenti.nodo_guasto if argomenti.guasto else None, "seme": argomenti.seme,
+        "modello": argomenti.modello or "default", "scadenza_s": argomenti.scadenza,
+        "tetto_token": None if argomenti.a_secco else argomenti.tetto_token,
+    })
+    scrivi_json(partita.cartella / "carte.json", dati_carte)
+    grafo = partita.grafo()
+    compito = (f"Leavitt in topologia {argomenti.topologia}: trovare il simbolo che sta su tutte e cinque "
+               "le carte e dichiararlo alla regia")
+    for nodo in leavitt_gioco.NODI:
+        if argomenti.a_secco:
+            comando = [sys.executable, NODO_SCAMBIO]
+            if argomenti.guasto and nodo == argomenti.nodo_guasto:
+                comando += ["--guasto", argomenti.guasto]
+            partita.lancia_nodo_script(nodo, comando, compito)
+        else:
+            vista = libvista.come_testo(libvista.vista(grafo, nodo))
+            prompt = leavitt_gioco.prompt_nodo(nodo, vista, libpartita.BUS)
+            dati = partita.lancia_nodo(nodo, prompt, compito, argomenti.modello)
+            print(f"{nodo}: sessione {dati['sessionId']} · pid {dati['pid']} · claude attach {dati['short_id']}")
+    print(f"partita {partita.id}: nodi lanciati, distribuisco le carte · simbolo comune {dati_carte['risposta']}")
+    for nodo in leavitt_gioco.NODI:
+        invio = libpartita.invia(leavitt_carte.messaggio_carta(dati_carte["carte"][nodo]), nodo)
+        if invio.returncode != 0:
+            partita.termina_nodi_script()
+            partita.ferma_nodi()
+            partita.chiudi("carta rifiutata")
+            raise SystemExit(f"il bus ha rifiutato la carta di {nodo}: {invio.stderr}")
+    chiusura, _ = attendi_dichiarazioni(partita, argomenti.scadenza,
+                                        None if argomenti.a_secco else argomenti.tetto_token)
+    if argomenti.a_secco and chiusura == "cinque-dichiarazioni":
+        try:
+            partita.attendi_nodi_script(30)
+        except subprocess.TimeoutExpired:
+            pass
+    partita.termina_nodi_script()
+    partita.ferma_nodi()
+    bus_terminati = partita.termina_bus_rimasti()
+
+    esito = leavitt_gioco.oracolo(righe_log(partita.id), dati_carte)
+    esito["chiusura"] = chiusura
+    esito["bus_terminati_a_partita_chiusa"] = bus_terminati
+    scrivi_json(partita.cartella / "oracolo.json", esito)
+    partita.aggiorna_meta(chiusura=chiusura)
+    if argomenti.a_secco:
+        riuscita = atteso_a_secco(argomenti, esito)
+    else:
+        osservazione = libosserva.osserva(partita.cartella)
+        scrivi_json(partita.cartella / "osservazione.json", osservazione)
+        libosserva.registra_partita({
+            "partita": partita.id, "gioco": "leavitt", "esito": esito["esito"],
+            "turni_umani": osservazione["turni_umani"], "token": osservazione["token"], "cwd": partita.cartella,
+        })
+        riuscita = osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
+        print(libosserva.come_testo(osservazione))
+    partita.chiudi(esito["esito"])
+    for voce in esito["per_nodo"]:
+        if voce.get("mancante"):
+            print(f"  {voce['nodo']}: nessuna dichiarazione")
+        else:
+            print(f"  {voce['nodo']}: {voce['simbolo'] or '—'} · {voce['valore']}")
+    if bus_terminati:
+        print(f"  bus rimasti vivi a partita chiusa, terminati: {bus_terminati}")
+    print(f"esito dell'oracolo: {esito['esito']} · {esito['dichiarazioni']} dichiarazioni · "
+          f"{len(esito['successive'])} successive · chiusura {chiusura} · "
+          f"partita {'riuscita' if riuscita else 'NON riuscita'}")
+    return 0 if riuscita else 1
+# </editor-fold>
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sotto = parser.add_subparsers(dest="comando", required=True)
@@ -219,13 +369,26 @@ def main():
     modo.add_argument("--a-secco", action="store_true")
     gioco.add_argument("--seme", type=int, default=42)
     gioco.add_argument("--modello")
+    leavitt_parser = sotto.add_parser("leavitt")
+    leavitt_parser.add_argument("--topologia", required=True, choices=leavitt_gioco.TOPOLOGIE)
+    leavitt_parser.add_argument("--a-secco", action="store_true")
+    leavitt_parser.add_argument("--guasto", choices=("sbagliata", "muta"))
+    leavitt_parser.add_argument("--nodo-guasto", default="E", choices=leavitt_gioco.NODI)
+    leavitt_parser.add_argument("--seme", type=int, default=42)
+    leavitt_parser.add_argument("--scadenza", type=int, default=SCADENZA_LEAVITT_S)
+    leavitt_parser.add_argument("--tetto-token", type=int, default=TETTO_TOKEN_LEAVITT)
+    leavitt_parser.add_argument("--modello")
     resoconto = sotto.add_parser("rapporto")
     resoconto.add_argument("partita")
     prova = sotto.add_parser("contro-prova")
     prova.add_argument("--modello")
     argomenti = parser.parse_args()
+    if argomenti.comando == "leavitt" and argomenti.guasto and not argomenti.a_secco:
+        leavitt_parser.error("--guasto vale solo con --a-secco")
     if argomenti.comando == "telefono":
         return telefono(argomenti)
+    if argomenti.comando == "leavitt":
+        return leavitt(argomenti)
     if argomenti.comando == "rapporto":
         return rapporto(argomenti)
     if argomenti.comando == "contro-prova":

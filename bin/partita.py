@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -207,12 +208,46 @@ class Partita:
             processo.wait(timeout=scadenza_s)
             self.segna_chiuso(id_nodo, None)
 
+    def termina_nodi_script(self):
+        """Termina i nodi script ancora vivi — una partita chiusa alla scadenza — e ne segna la chiusura."""
+        for id_nodo, processo in self.processi_script.items():
+            if processo.poll() is None:
+                processo.terminate()
+                try:
+                    processo.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    processo.kill()
+                    processo.wait()
+            self.segna_chiuso(id_nodo, None)
+
     def ferma_nodi(self):
         """Ferma ogni sessione, poi ne segna la chiusura con le azioni fuori bus contate sul transcript."""
         for id_nodo, dati in self.sessioni().items():
             subprocess.run(["claude", "stop", dati["short_id"]], capture_output=True, text=True, timeout=60)
             percorso = transcript(dati["sessionId"])
             self.segna_chiuso(id_nodo, azioni_fuori_bus(percorso) if percorso else None)
+
+    def termina_bus_rimasti(self):
+        """Termina i processi del bus ancora vivi con la cartella di lavoro sotto nodi/ della partita;
+        restituisce i loro pid. Una sessione fermata mentre aspetta in `bus recv` può lasciare il
+        bus orfano fino alla sua attesa, e il bus orfano leggerebbe un messaggio a partita chiusa."""
+        radice = (self.cartella / "nodi").resolve()
+        terminati = []
+        for voce in Path("/proc").iterdir():
+            if not voce.name.isdigit():
+                continue
+            try:
+                cartella_di_lavoro = Path(os.readlink(voce / "cwd"))
+                argomenti = (voce / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            except OSError:
+                continue
+            if str(BUS) in argomenti and radice in cartella_di_lavoro.parents:
+                try:
+                    os.kill(int(voce.name), signal.SIGTERM)
+                    terminati.append(int(voce.name))
+                except ProcessLookupError:
+                    continue
+        return terminati
 
 
 def stati_sessioni():
