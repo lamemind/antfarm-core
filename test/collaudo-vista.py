@@ -19,6 +19,9 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
 - spawn sintetico (test/flussi/spawn.jsonl, harness in modo flusso): il figlio compare fra i nodi,
   gli archi del delta fra gli archi — genitore → figlio compreso —, la testata porta la versione
   del delta, e i messaggi da e verso il figlio corrono sugli archi nati dallo spawn
+- bottone a secco (copione boom): il nodo umano e la sorgente compaiono coi loro tipi; una riga
+  `scritto` del log è un pallino [data-esito=scritto] che corre sull'arco A → bottone e si ferma
+  sulla sorgente, e il clic porta il testo della riga
 
 Playwright è fissato alla versione il cui Chromium è già in ~/.cache/ms-playwright. Con
 --schermate salva una schermata per scenario. Esce 1 se una verifica fallisce.
@@ -39,6 +42,7 @@ HARNESS = ORCHESTRA / "bin" / "harness.py"
 LOG_MESSAGGI = ORCHESTRA / "registro" / "messaggi.jsonl"
 PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
+PARTITA_SORGENTE = "2026-11-08-001923-bottone-a-secco-boom"
 FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
 VELOCITA_REPLAY = "20"
 ATTESA_MS = 60000
@@ -84,7 +88,8 @@ def apri_e_attendi(pagina, indirizzo):
     pagina.goto(indirizzo)
     pagina.wait_for_selector('body[data-stato="finito"]', state="attached", timeout=ATTESA_MS)
     pagina.wait_for_function(
-        "() => [...document.querySelectorAll('[data-pallino][data-esito=consegnato]')].every(p => p.hasAttribute('data-arrivato'))",
+        "() => [...document.querySelectorAll('[data-pallino][data-esito=consegnato], [data-pallino][data-esito=scritto]')]"
+        ".every(p => p.hasAttribute('data-arrivato'))",
         timeout=ATTESA_MS,
     )
 
@@ -92,7 +97,7 @@ def apri_e_attendi(pagina, indirizzo):
 def misura_dom(pagina):
     return pagina.evaluate("""() => {
         const centro = (elemento) => { const r = elemento.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, raggio: r.width / 2 }; };
-        const nodi = Object.fromEntries([...document.querySelectorAll('[data-nodo]')].map(g => [g.dataset.nodo, centro(g.querySelector('circle'))]));
+        const nodi = Object.fromEntries([...document.querySelectorAll('[data-nodo]')].map(g => [g.dataset.nodo, { ...centro(g.querySelector('circle')), classi: g.getAttribute('class') }]));
         const archi = Object.fromEntries([...document.querySelectorAll('[data-arco]')].map(g => [g.dataset.arco, g.querySelector('path.arco').id]));
         const pallini = [...document.querySelectorAll('[data-pallino]')].map(p => ({
             chiave: p.dataset.pallino,
@@ -208,6 +213,38 @@ def scenario_spawn(pagina, schermate, _log):
             pagina.screenshot(path=str(schermate / "vista-spawn-sintetico.png"))
 
 
+def scenario_sorgente(pagina, schermate, log):
+    print(f"bottone a secco {PARTITA_SORGENTE}")
+    grafo = json.loads((ORCHESTRA / "partite" / PARTITA_SORGENTE / "grafo.json").read_text(encoding="utf-8"))
+    scritti = {indice: riga for indice, riga in log.items()
+               if riga.get("partita") == PARTITA_SORGENTE and riga["esito"] == "scritto"}
+    with Harness("replay", PARTITA_SORGENTE, "--velocita", VELOCITA_REPLAY) as harness:
+        apri_e_attendi(pagina, harness.indirizzo)
+        dom = misura_dom(pagina)
+        verifica(f"nodi disegnati = nodi di grafo.json ({len(grafo['nodi'])})", len(dom["nodi"]) == len(grafo["nodi"]))
+        for voce in grafo["nodi"]:
+            if voce["tipo"] in ("umano", "sorgente"):
+                verifica(f"il nodo {voce['id']} porta la classe tipo-{voce['tipo']}",
+                         f"tipo-{voce['tipo']}" in (dom["nodi"].get(voce["id"], {}).get("classi") or ""))
+        pallini_scritti = [p for p in dom["pallini"] if p["esito"] == "scritto"]
+        verifica(f"un pallino scritto per riga scritto del log ({len(scritti)})",
+                 len(scritti) >= 1 and sorted(p["chiave"] for p in pallini_scritti) == sorted(f"{PARTITA_SORGENTE}:{i}" for i in scritti),
+                 f"{len(pallini_scritti)} pallini scritto nel DOM")
+        for pallino in pallini_scritti:
+            riga = pallino["evento"]["riga"]
+            arco = f"{riga['da']}→{riga['a']}"
+            fermo_su = nodo_piu_vicino(dom["nodi"], pallino["posizione"])
+            verifica(f"pallino scritto {pallino['chiave']}: corsa sull'arco {arco}, fermo su {riga['a']}",
+                     pallino["corsa"] == f"#{dom['archi'].get(arco)}" and fermo_su == riga["a"],
+                     f"corsa {pallino['corsa']}, nodo più vicino {fermo_su}")
+            dettaglio = dettaglio_dopo_clic(pagina, pallino["chiave"])
+            indice = pallino["evento"]["indice"]
+            verifica(f"clic sul pallino scritto: testo uguale alla riga {indice} del log",
+                     dettaglio["riga"]["testo"] == log[indice]["testo"] and dettaglio["riga"]["esito"] == "scritto")
+        if schermate:
+            pagina.screenshot(path=str(schermate / "vista-bottone-a-secco.png"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--schermate", type=Path)
@@ -217,7 +254,7 @@ def main():
     log = righe_del_log()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn):
+        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_sorgente):
             pagina = browser.new_page(viewport={"width": 1400, "height": 900})
             errori_pagina = []
             pagina.on("pageerror", lambda errore: errori_pagina.append(str(errore)))
