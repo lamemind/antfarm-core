@@ -78,12 +78,16 @@ def discordanze_osservazione(registro, osservazione):
 
 
 def sezione_messaggi_per_arco(righe):
-    testo = ["## Messaggi per arco", "", "| Arco | Consegnati | Rifiutati | Letti |", "| --- | --- | --- | --- |"]
+    """Una riga per coppia (da, a) del log. La colonna Scritti — righe `scritto` verso una
+    sorgente — c'è solo se la partita ne ha, così i rapporti dei giochi senza sorgenti non cambiano."""
+    con_scritti = any(riga["esito"] == "scritto" for riga in righe)
+    colonne = ["Consegnati", "Rifiutati", "Letti"] + (["Scritti"] if con_scritti else [])
+    esiti = ["consegnato", "rifiutato", "letto"] + (["scritto"] if con_scritti else [])
+    testo = ["## Messaggi per arco", "", "| Arco | " + " | ".join(colonne) + " |", "| --- |" + " --- |" * len(colonne)]
     conteggi = Counter((riga["da"], riga["a"], riga["esito"]) for riga in righe)
     archi = list(dict.fromkeys((riga["da"], riga["a"]) for riga in righe))
     for da, a in archi:
-        testo.append(f"| {da} → {a} | {conteggi[(da, a, 'consegnato')]} | {conteggi[(da, a, 'rifiutato')]} "
-                     f"| {conteggi[(da, a, 'letto')]} |")
+        testo.append(f"| {da} → {a} | " + " | ".join(str(conteggi[(da, a, esito)]) for esito in esiti) + " |")
     motivi = Counter(riga["motivo"] for riga in righe if riga["esito"] == "rifiutato")
     testo += ["", "Rifiuti per motivo: " + (", ".join(f"`{motivo}` {numero}" for motivo, numero in motivi.items())
                                             if motivi else "nessuno") + ".",
@@ -172,9 +176,11 @@ def sezione_nodo_umano(righe, cartella_partita, nodo="umano"):
         testo += [f"| {indice} | {riga['da']} | {riga['ts']} | {riga['testo'].replace('|', '¦')} |"
                   for indice, riga in enumerate(messaggi, start=1)]
         testo.append("")
-    testo += [f"Messaggi al nodo `{nodo}`: **{len(messaggi)}** · letti {conteggio['letti']} · ancora nella casella "
-              f"{conteggio['in_casella']} · risposte dell'umano {conteggio['risposte']}. "
-              + ("Tutti senza risposta: il nodo umano è passivo." if messaggi and not conteggio["risposte"] else ""), "",
+    sintesi = (f"Messaggi al nodo `{nodo}`: **{len(messaggi)}** · letti {conteggio['letti']} · ancora nella casella "
+               f"{conteggio['in_casella']} · risposte dell'umano {conteggio['risposte']}.")
+    if messaggi and not conteggio["risposte"]:
+        sintesi += " Tutti senza risposta: il nodo umano è passivo."
+    testo += [sintesi, "",
               f"Fonte: log — righe `consegnato` con `a` = `{nodo}`, righe `letto` con `a` = `{nodo}`, righe `consegnato` "
               f"con `da` = `{nodo}`; cartella della partita, file in `caselle/{nodo}/` mai prelevati.", ""]
     return testo

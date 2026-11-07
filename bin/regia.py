@@ -12,9 +12,10 @@
         regia, bus e oracolo senza LLM, e non scrive nel registro delle partite.
 
     orchestra/bin/regia.py rapporto <cartella della partita>
-        riscrive rapporto.md di una partita chiusa del telefono o di Leavitt dalle sue fonti: la
-        riga del registro delle partite, le righe del log dei messaggi, i transcript dei nodi, e
-        per Leavitt meta.json e carte.json. Il gioco lo dice `gioco` in meta.json. Lo stesso
+        riscrive rapporto.md di una partita chiusa del telefono, di Leavitt o del bottone rosso
+        dalle sue fonti: la riga del registro delle partite, le righe del log dei messaggi, i
+        transcript dei nodi, per Leavitt meta.json e carte.json, per il bottone meta.json,
+        nodi.json e il file della sorgente. Il gioco lo dice `gioco` in meta.json. Lo stesso
         rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
 
     orchestra/bin/regia.py leavitt --topologia ruota|catena|cerchio|completo [--seme <n>] [--modello <m>]
@@ -42,7 +43,8 @@
         scrittura in bottone, la resa di F (un messaggio di F alla regia), la scadenza (default
         600 s) o — con le sessioni — i token oltre il tetto (default 400.000). Ferma i nodi,
         chiama l'oracolo sul file — BOOM o intatto —, osserva le sessioni, scrive la riga nel
-        registro delle partite e chiude. Scrive oracolo.json nella cartella della partita. Il
+        registro delle partite e chiude. Scrive oracolo.json nella cartella della partita, e
+        con le sessioni osservazione.json e rapporto.md (`giochi/bottone/rapporto.py`). Il
         nodo umano non ha processo: i messaggi di A all'umano restano nella sua casella. Con le
         sessioni esce 0 se i controlli di osservabilità passano e i turni umani sono 0: l'esito
         è una misura del gioco e non decide l'uscita. `--a-secco` usa nodi script che recitano
@@ -83,6 +85,7 @@ sys.path.insert(1, str(Path(__file__).resolve().parent.parent / "giochi" / "tele
 sys.path.insert(2, str(Path(__file__).resolve().parent.parent))
 import fatti as libfatti  # noqa: E402
 import giochi.bottone.gioco as bottone_gioco  # noqa: E402
+import giochi.bottone.rapporto as bottone_rapporto  # noqa: E402
 import giochi.leavitt.carte as leavitt_carte  # noqa: E402
 import giochi.leavitt.gioco as leavitt_gioco  # noqa: E402
 import giochi.leavitt.rapporto as leavitt_rapporto  # noqa: E402
@@ -379,7 +382,8 @@ def telefono(argomenti):
 def rapporto(argomenti):
     cartella = Path(argomenti.partita).resolve()
     gioco = json.loads((cartella / "meta.json").read_text(encoding="utf-8")).get("gioco") if (cartella / "meta.json").is_file() else None
-    scrittori = {"telefono": telefono_rapporto.scrivi, "leavitt": leavitt_rapporto.scrivi}
+    scrittori = {"telefono": telefono_rapporto.scrivi, "leavitt": leavitt_rapporto.scrivi,
+                 "bottone": bottone_rapporto.scrivi}
     if gioco not in scrittori:
         raise SystemExit(f"non è la cartella di una partita di un gioco ({', '.join(scrittori)}): {cartella}")
     osservazione = libosserva.osserva(cartella)
@@ -617,6 +621,8 @@ def bottone(argomenti):
         })
         riuscita = osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
         print(libosserva.come_testo(osservazione))
+        percorso = bottone_rapporto.scrivi(partita.cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+        print(f"rapporto: {percorso}")
     partita.chiudi(esito["esito"])
     for scrittura in esito["scritture"]:
         print(f"  scritto in bottone da {scrittura['da']}: {scrittura['testo'][:80]}")
