@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contro-prove deterministiche del motore: validatore del grafo e degli eventi, vista, bus. Nessun LLM.
+# Contro-prove deterministiche del motore: validatore del grafo e degli eventi, vista, bus, azioni fuori bus. Nessun LLM.
 #
 #   orchestra/test/contro-prove.sh
 #
@@ -204,6 +204,113 @@ PY
 verifica "conteggio del rapporto: 1 messaggio, 0 letti, 0 risposte, 1 in casella" \
   jq -e '.messaggi == 1 and .letti == 0 and .risposte == 0 and .in_casella == 1' <<< "$CONTEGGIO_UMANO"
 sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
+
+echo "azioni fuori bus"
+AZIONI=$(python3 - "$TMP" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+
+radice = Path(sys.argv[1])
+sys.path.insert(0, str(radice / "bin"))
+import partita as libpartita
+
+libpartita.PROGETTI_CLAUDE = radice / "transcript"
+subprocess.run = lambda *argomenti, **opzioni: None  # `claude stop` non ha una sessione da fermare
+bus = str(libpartita.BUS)
+DENIED = "Permission to use Bash has been denied."
+
+
+def uso(indice, comando, nome="Bash"):
+    return {"type": "tool_use", "id": f"u{indice}", "name": nome, "input": {"command": comando} if comando else {}}
+
+
+def esito(indice, testo, errore=False):
+    return {"type": "tool_result", "tool_use_id": f"u{indice}", "content": testo, "is_error": errore}
+
+
+def transcript(sessione, blocchi):
+    cartella = libpartita.PROGETTI_CLAUDE / "progetto"
+    cartella.mkdir(parents=True, exist_ok=True)
+    with open(cartella / f"{sessione}.jsonl", "w", encoding="utf-8") as file_transcript:
+        for tipo, blocco in blocchi:
+            file_transcript.write(json.dumps({"type": tipo, "message": {"content": [blocco]}}) + "\n")
+
+
+cartella = radice / "partite" / "prova-azioni"
+cartella.mkdir(parents=True)
+partita = libpartita.Partita(cartella)
+voci = {
+    "regia": {"tipo": "script"},
+    "script": {"tipo": "script", "chiuso": "ieri", "azioni_fuori_bus": None},
+    "A": {"tipo": "llm", "short_id": "aaaa", "sessionId": "sess-a"},
+    "B": {"tipo": "llm", "short_id": "bbbb", "sessionId": "sess-b"},
+    "S": {"tipo": "llm", "short_id": "ssss", "sessionId": "sess-sparito"},
+}
+libpartita.scrivi_json(partita.file_nodi, {"partita": "prova-azioni", "stato": "chiusa", "nodi": voci})
+COMANDO_SU_DUE_RIGHE = "echo 'ciao   mondo' | wc -w\n# seconda riga"
+transcript("sess-a", [
+    ("assistant", uso(1, f"{bus} send B ciao")), ("user", esito(1, "consegnato")),
+    ("assistant", uso(2, "cat /etc/hostname")), ("user", esito(2, DENIED, True)),
+    ("assistant", uso(3, COMANDO_SU_DUE_RIGHE)), ("user", esito(3, "x" * 5000)),
+    ("assistant", uso(4, f"  {bus} recv")), ("user", esito(4, "messaggio")),
+    ("assistant", uso(5, "sleep 900")),
+])
+transcript("sess-b", [("assistant", uso(1, f"{bus} recv")), ("user", esito(1, "messaggio"))])
+partita.ferma_nodi()
+dopo_chiusura = partita.nodi()["nodi"]
+a, b, s = dopo_chiusura["A"], dopo_chiusura["B"], dopo_chiusura["S"]
+
+elenco = a["azioni"]
+senza_transcript = {"azioni": s["azioni"], "conteggio": s["azioni_fuori_bus"]}
+
+# Le partite già giocate: la voce porta il conteggio, non l'elenco.
+a.pop("azioni")
+b.pop("azioni")
+s.pop("azioni")
+s["azioni_fuori_bus"] = 3
+dopo_chiusura["script"].pop("azioni", None)
+dopo_chiusura["N"] = {"tipo": "llm", "sessionId": "sess-b"}  # voce senza conteggio
+dopo_chiusura["D"] = {"tipo": "llm", "sessionId": "sess-a", "azioni_fuori_bus": 99}  # conteggio diverso dall'elenco
+libpartita.scrivi_json(partita.file_nodi, {"partita": "prova-azioni", "stato": "chiusa", "nodi": dopo_chiusura})
+scritte, problemi = partita.riscrivi_azioni()
+riscritte = partita.nodi()["nodi"]
+impronta = partita.file_nodi.read_bytes()
+partita.riscrivi_azioni()
+print(json.dumps({
+    "elenco": elenco,
+    "conteggio_a": a["azioni_fuori_bus"],
+    "comando_atteso": COMANDO_SU_DUE_RIGHE,
+    "senza_transcript": senza_transcript,
+    "scritte": scritte,
+    "problemi": problemi,
+    "riscritto_a": riscritte["A"].get("azioni"),
+    "script_ha_azioni": "azioni" in riscritte["script"],
+    "senza_conteggio_ha_azioni": "azioni" in riscritte["N"],
+    "diverso": {"azioni": "azioni" in riscritte["D"], "conteggio": riscritte["D"]["azioni_fuori_bus"]},
+    "idempotente": impronta == partita.file_nodi.read_bytes(),
+}, ensure_ascii=False))
+PY
+)
+verifica "a fine partita: 3 azioni, le chiamate del bus escluse" jq -e '.elenco | length == 3' <<< "$AZIONI"
+verifica "il conteggio è la lunghezza dell'elenco" jq -e '.conteggio_a == (.elenco | length)' <<< "$AZIONI"
+verifica "un nodo senza transcript alla chiusura: elenco e conteggio null" \
+  jq -e '.senza_transcript.azioni == null and .senza_transcript.conteggio == null' <<< "$AZIONI"
+verifica "ordine progressivo da 1" jq -e '[.elenco[].ordine] == [1,2,3]' <<< "$AZIONI"
+verifica "il comando resta intero, a capo compreso" jq -e '.elenco[1].comando == .comando_atteso' <<< "$AZIONI"
+verifica "un rifiuto porta errore sì e il testo del rifiuto" \
+  jq -e '.elenco[0].errore == true and (.elenco[0].esito | startswith("Permission to use Bash"))' <<< "$AZIONI"
+verifica "l'esito si tronca a 1000 caratteri, errore no" \
+  jq -e '.elenco[1].errore == false and (.elenco[1].esito | length) == 1000' <<< "$AZIONI"
+verifica "una chiamata senza risposta: esito vuoto, errore null" \
+  jq -e '.elenco[2].esito == "" and .elenco[2].errore == null' <<< "$AZIONI"
+verifica "riscrittura: stesso elenco della chiusura" jq -e '.riscritto_a == .elenco' <<< "$AZIONI"
+verifica "riscrittura: B con 0 azioni porta l'elenco vuoto" jq -e '.scritte.A == 3 and .scritte.B == 0' <<< "$AZIONI"
+verifica "riscrittura: né un nodo script né una voce senza conteggio ricevono l'elenco" \
+  jq -e '.script_ha_azioni == false and .senza_conteggio_ha_azioni == false' <<< "$AZIONI"
+verifica "riscrittura: conteggio diverso dall'elenco → problema, voce e conteggio intatti" \
+  jq -e '(.problemi.D | contains("99 nel conteggio")) and .diverso.azioni == false and .diverso.conteggio == 99' <<< "$AZIONI"
+verifica "riscrittura: transcript sparito → problema" jq -e '.problemi.S | contains("assente")' <<< "$AZIONI"
+verifica "riscrittura: un secondo giro non cambia il file" jq -e '.idempotente' <<< "$AZIONI"
 
 echo "oracolo del telefono"
 ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'

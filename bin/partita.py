@@ -4,10 +4,11 @@ Libreria della regia. Scrive i due file che legano una sessione alla partita sen
 niente all'agente: nodi.json — la coppia (pid, starttime) che il bus confronta con gli antenati
 del chiamante, più sessionId, genitore e compito — e meta.json, i parametri della partita.
 
-A fine partita scrive nella voce di ogni nodo `chiuso`, l'ora al millesimo, e `azioni_fuori_bus`:
-per un nodo LLM le chiamate a tool del transcript che non sono un comando Bash del bus, per un
-nodo script null, perché non ha transcript. L'harness legge i due campi da nodi.json e non apre
-mai i transcript: il formato di Claude Code si legge solo qui.
+A fine partita scrive nella voce di ogni nodo `chiuso`, l'ora al millesimo, `azioni`, l'elenco
+delle chiamate a tool del transcript che non sono un comando Bash del bus, e `azioni_fuori_bus`,
+la sua lunghezza. Per un nodo senza transcript, come un nodo script, i due campi valgono null.
+L'harness legge questi campi da nodi.json e non apre mai i transcript: il formato di Claude Code
+si legge solo qui.
 """
 
 import json
@@ -31,6 +32,7 @@ VARIABILI_DA_NON_PASSARE = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
 ESPRESSIONE_LANCIO = re.compile(r"backgrounded · ([0-9a-f]{8}) · ")
 ATTESA_SERVIZIO_S = 60
 TIPI_SENZA_PROCESSO = ("umano", "sorgente")
+LUNGHEZZA_ESITO_AZIONE = 1000
 
 
 def adesso(precisione="seconds"):
@@ -127,15 +129,44 @@ class Partita:
         nodi["nodi"][id_nodo] = dati
         scrivi_json(self.file_nodi, nodi)
 
-    def segna_chiuso(self, id_nodo, azioni_fuori_bus):
-        """`chiuso` e `azioni_fuori_bus` nella voce del nodo; un nodo già chiuso resta com'è."""
+    def segna_chiuso(self, id_nodo, azioni):
+        """`chiuso`, `azioni` e il conteggio `azioni_fuori_bus` nella voce del nodo; un nodo già
+        chiuso resta com'è. Il conteggio nasce dall'elenco, quindi i due campi non divergono.
+        `azioni` None vuol dire nessun transcript da leggere: i due campi restano null."""
         nodi = self.nodi()
         voce = nodi["nodi"][id_nodo]
         if "chiuso" in voce:
             return
         voce["chiuso"] = adesso("milliseconds")
-        voce["azioni_fuori_bus"] = azioni_fuori_bus
+        voce["azioni"] = azioni
+        voce["azioni_fuori_bus"] = None if azioni is None else len(azioni)
         scrivi_json(self.file_nodi, nodi)
+
+    def riscrivi_azioni(self):
+        """Riscrive `azioni` dai transcript nelle voci che portano già un conteggio, e solo in
+        quelle: una voce senza conteggio non emette nodo-chiuso nel replay, o è un nodo script.
+
+        Il conteggio scritto alla chiusura è la misura originale e non cambia. Una voce il cui
+        transcript è sparito, o il cui elenco ha una lunghezza diversa dal conteggio, resta com'è
+        e finisce fra i problemi. Restituisce nodo → numero di azioni scritte, nodo → problema."""
+        nodi = self.nodi()
+        scritte, problemi = {}, {}
+        for id_nodo, voce in nodi["nodi"].items():
+            conteggio = voce.get("azioni_fuori_bus")
+            if conteggio is None:
+                continue
+            percorso = transcript(voce["sessionId"])
+            if percorso is None:
+                problemi[id_nodo] = f"transcript {voce['sessionId']} assente"
+                continue
+            azioni = azioni_del_transcript(percorso)
+            if len(azioni) != conteggio:
+                problemi[id_nodo] = f"{len(azioni)} azioni nel transcript, {conteggio} nel conteggio"
+                continue
+            voce["azioni"] = azioni
+            scritte[id_nodo] = len(azioni)
+        scrivi_json(self.file_nodi, nodi)
+        return scritte, problemi
 
     def chiudi(self, esito):
         nodi = self.nodi()
@@ -243,11 +274,11 @@ class Partita:
             self.segna_chiuso(id_nodo, None)
 
     def ferma_nodi(self):
-        """Ferma ogni sessione, poi ne segna la chiusura con le azioni fuori bus contate sul transcript."""
+        """Ferma ogni sessione, poi ne segna la chiusura con le azioni fuori bus lette dal transcript."""
         for id_nodo, dati in self.sessioni().items():
             subprocess.run(["claude", "stop", dati["short_id"]], capture_output=True, text=True, timeout=60)
             percorso = transcript(dati["sessionId"])
-            self.segna_chiuso(id_nodo, azioni_fuori_bus(percorso) if percorso else None)
+            self.segna_chiuso(id_nodo, azioni_del_transcript(percorso) if percorso else None)
 
     def termina_bus_rimasti(self):
         """Termina i processi del bus ancora vivi con la cartella di lavoro sotto nodi/ della partita;
@@ -316,10 +347,17 @@ def chiamate_bash(percorso_transcript):
     return [(nome, comando, *risultati.get(id_uso, ("", None))) for id_uso, nome, comando in usi]
 
 
-def azioni_fuori_bus(percorso_transcript):
-    """Le chiamate a tool che non sono un comando Bash del bus: tutto ciò che un nodo fa fuori dal canale."""
-    return sum(1 for nome, comando, _, _ in chiamate_bash(percorso_transcript)
-               if nome != "Bash" or not comando.lstrip().startswith(str(BUS)))
+def azioni_del_transcript(percorso_transcript):
+    """Le chiamate a tool che non sono un comando Bash del bus, cioè tutto ciò che un nodo fa fuori
+    dal canale, come elenco di voci nell'ordine del transcript.
+
+    Il comando resta intero; l'esito si tronca a LUNGHEZZA_ESITO_AZIONE caratteri, perché può
+    contenere il testo di un messaggio. `errore` è null se la chiamata non ha ricevuto risposta,
+    come un comando interrotto dalla fermata della sessione."""
+    fuori_bus = [chiamata for chiamata in chiamate_bash(percorso_transcript)
+                 if chiamata[0] != "Bash" or not chiamata[1].lstrip().startswith(str(BUS))]
+    return [{"ordine": ordine, "tool": nome, "comando": comando, "esito": esito[:LUNGHEZZA_ESITO_AZIONE], "errore": errore}
+            for ordine, (nome, comando, esito, errore) in enumerate(fuori_bus, start=1)]
 
 
 def invia(testo, destinatario):

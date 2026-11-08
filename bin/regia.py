@@ -18,6 +18,13 @@
         nodi.json e il file della sorgente. Il gioco lo dice `gioco` in meta.json. Lo stesso
         rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
 
+    orchestra/bin/regia.py azioni [<partita>...]
+        riscrive il campo `azioni` di nodi.json dai transcript delle partite chiuse, solo nelle
+        voci che portano già il conteggio `azioni_fuori_bus`; il conteggio non cambia. Una partita
+        si nomina con l'id o con la cartella; senza argomenti le prende tutte, saltando quelle
+        ancora aperte. Esce 1 se un transcript manca o se un elenco non ha la lunghezza del
+        conteggio: quella voce resta com'è.
+
     orchestra/bin/regia.py leavitt --topologia ruota|catena|cerchio|completo [--seme <n>] [--modello <m>]
                            [--scadenza <s>] [--tetto-token <n>]
     orchestra/bin/regia.py leavitt --topologia … --a-secco [--guasto sbagliata|muta [--nodo-guasto X]]
@@ -390,6 +397,39 @@ def rapporto(argomenti):
     percorso = scrittori[gioco](cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
     print(f"rapporto: {percorso}")
     return 0
+
+
+def cartella_partita(argomento):
+    """La cartella di una partita, dall'id sotto partite/ o da un percorso."""
+    for candidata in (libpartita.PARTITE / argomento, Path(argomento)):
+        if (candidata / "nodi.json").is_file():
+            return candidata.resolve()
+    raise SystemExit(f"partita non trovata: {argomento}")
+
+
+def azioni(argomenti):
+    """Riscrive il dettaglio delle azioni fuori bus. Una partita aperta non si tocca, perché la
+    regia che la gioca riscrive lo stesso nodi.json: nominata esplicitamente è un errore."""
+    if argomenti.partite:
+        cartelle = [cartella_partita(nome) for nome in argomenti.partite]
+    else:
+        cartelle = sorted(file_nodi.parent for file_nodi in libpartita.PARTITE.glob("*/nodi.json"))
+    problemi_totali = 0
+    for cartella in cartelle:
+        partita = libpartita.Partita(cartella)
+        if partita.nodi().get("stato") != "chiusa":
+            if argomenti.partite:
+                raise SystemExit(f"partita ancora aperta: {partita.id}")
+            print(f"{partita.id}: aperta, saltata")
+            continue
+        scritte, problemi = partita.riscrivi_azioni()
+        if scritte or problemi:
+            resoconto = " · ".join(f"{nodo} {numero}" for nodo, numero in scritte.items())
+            print(f"{partita.id}: {resoconto or 'nessuna voce scritta'}")
+        for nodo, problema in problemi.items():
+            print(f"  PROBLEMA {nodo}: {problema}")
+        problemi_totali += len(problemi)
+    return 1 if problemi_totali else 0
 # </editor-fold>
 
 
@@ -660,6 +700,8 @@ def main():
     bottone_parser.add_argument("--modello")
     resoconto = sotto.add_parser("rapporto")
     resoconto.add_argument("partita")
+    dettaglio_azioni = sotto.add_parser("azioni")
+    dettaglio_azioni.add_argument("partite", nargs="*")
     prova = sotto.add_parser("contro-prova")
     prova.add_argument("pezzo", nargs="?", default="bus", choices=("bus", "sorgente"))
     prova.add_argument("--modello")
@@ -676,6 +718,8 @@ def main():
         return bottone(argomenti)
     if argomenti.comando == "rapporto":
         return rapporto(argomenti)
+    if argomenti.comando == "azioni":
+        return azioni(argomenti)
     if argomenti.comando == "contro-prova":
         return contro_prova_sorgente(argomenti) if argomenti.pezzo == "sorgente" else contro_prova(argomenti)
     return 2
