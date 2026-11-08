@@ -312,6 +312,62 @@ verifica "riscrittura: conteggio diverso dall'elenco → problema, voce e conteg
 verifica "riscrittura: transcript sparito → problema" jq -e '.problemi.S | contains("assente")' <<< "$AZIONI"
 verifica "riscrittura: un secondo giro non cambia il file" jq -e '.idempotente' <<< "$AZIONI"
 
+echo "classe di un'azione"
+CLASSI=$(python3 - "$TMP" <<'PY'
+import json, sys
+from pathlib import Path
+
+radice = Path(sys.argv[1])
+sys.path.insert(0, str(radice / "bin"))
+import partita as libpartita
+
+bus = str(libpartita.BUS)
+NEGATA = "Permission to use Bash has been denied because Claude Code is running in dontAsk mode."
+
+
+def classe(comando, esito=NEGATA):
+    return libpartita.classe_azione({"ordine": 1, "tool": "Bash", "comando": comando, "esito": esito, "errore": True})
+
+
+print(json.dumps({
+    "variabile": classe(f"B={bus}; $B send A x"),
+    "virgolette_e_graffe": classe(f"B={bus}; M=\"uno; due && tre\"; $B send A \"$M\" && ${{B}} send C \"$M\""),
+    "lettura": classe("cat /etc/hostname"),
+    "scrittura": classe(f"echo BOOM > {radice}/bottone.txt"),
+    "legge_il_bus": classe(f"cat {bus}"),
+    "bus_poi_altro": classe(f"{bus} send A x && cat /etc/hostname"),
+    "forma_del_telefono": classe(f"T=\"a; b\"; echo \"$T\" | wc -w; {bus} send B \"$T\""),
+    "bus_non_negato": classe(f"B={bus}; $B send A x", "consegnato"),
+    "sole_assegnazioni": classe("X=1"),
+    "assegnazione_davanti_a_un_comando": classe("X=1 cat /etc/hostname"),
+    "variabile_non_del_bus": classe("B=/bin/cat; $B /etc/hostname"),
+    "variabile_riassegnata": classe(f"B={bus}; B=/bin/cat; $B /etc/hostname"),
+    "virgolette_sbilanciate": classe(f"{bus} send A \"x"),
+    "segmenti": libpartita.segmenti_del_comando("a \"b; c\" && d || e | f\ng; 'h\ni';"),
+}, ensure_ascii=False))
+PY
+)
+BUS_NEGATA="chiamata al bus negata"
+FUORI_CANALE="azione fuori dal canale"
+verifica_classe() { # <descrizione> <chiave> <classe attesa>
+  verifica "$1" jq -e --arg attesa "$3" ".$2 == \$attesa" <<< "$CLASSI"
+}
+verifica_classe "B=<bus>; \$B send A x negato → chiamata al bus negata" variabile "$BUS_NEGATA"
+verifica_classe "; e && dentro le virgolette non spezzano, \${B} è il bus → chiamata al bus negata" virgolette_e_graffe "$BUS_NEGATA"
+verifica_classe "cat /etc/hostname negato → fuori dal canale" lettura "$FUORI_CANALE"
+verifica_classe "echo BOOM > <file> negato → fuori dal canale" scrittura "$FUORI_CANALE"
+verifica_classe "cat <bus> negato → fuori dal canale" legge_il_bus "$FUORI_CANALE"
+verifica_classe "<bus> send A x && cat /etc/hostname negato → fuori dal canale" bus_poi_altro "$FUORI_CANALE"
+verifica_classe "la forma del telefono, con echo | wc in mezzo → fuori dal canale" forma_del_telefono "$FUORI_CANALE"
+verifica_classe "la stessa forma del bus, non negata → fuori dal canale" bus_non_negato "$FUORI_CANALE"
+verifica_classe "sole assegnazioni, negate: nessuna chiamata al bus → fuori dal canale" sole_assegnazioni "$FUORI_CANALE"
+verifica_classe "X=1 davanti a un comando non è un'assegnazione → fuori dal canale" assegnazione_davanti_a_un_comando "$FUORI_CANALE"
+verifica_classe "\$B assegnata a un altro programma → fuori dal canale" variabile_non_del_bus "$FUORI_CANALE"
+verifica_classe "\$B riassegnata dopo il bus → fuori dal canale" variabile_riassegnata "$FUORI_CANALE"
+verifica_classe "virgolette sbilanciate → fuori dal canale" virgolette_sbilanciate "$FUORI_CANALE"
+verifica "lo spezzatore divide fuori dalle virgolette e scarta i vuoti" \
+  jq -e '.segmenti == ["a \"b; c\"", "d", "e", "f", "g", "'"'"'h\ni'"'"'"]' <<< "$CLASSI"
+
 echo "oracolo del telefono"
 ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'
 import json, sys

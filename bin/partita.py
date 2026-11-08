@@ -14,6 +14,7 @@ si legge solo qui.
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -33,6 +34,11 @@ ESPRESSIONE_LANCIO = re.compile(r"backgrounded · ([0-9a-f]{8}) · ")
 ATTESA_SERVIZIO_S = 60
 TIPI_SENZA_PROCESSO = ("umano", "sorgente")
 LUNGHEZZA_ESITO_AZIONE = 1000
+PREFISSO_RIFIUTO = "Permission to use Bash has been denied"
+CHIAMATA_BUS_NEGATA = "chiamata al bus negata"
+AZIONE_FUORI_CANALE = "azione fuori dal canale"
+ASSEGNAZIONE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
+RIFERIMENTO_VARIABILE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
 
 
 def adesso(precisione="seconds"):
@@ -358,6 +364,63 @@ def azioni_del_transcript(percorso_transcript):
                  if chiamata[0] != "Bash" or not chiamata[1].lstrip().startswith(str(BUS))]
     return [{"ordine": ordine, "tool": nome, "comando": comando, "esito": esito[:LUNGHEZZA_ESITO_AZIONE], "errore": errore}
             for ordine, (nome, comando, esito, errore) in enumerate(fuori_bus, start=1)]
+
+
+def segmenti_del_comando(comando):
+    """Il comando spezzato su `;`, `&&`, `||`, `|` e a capo, fuori dalle virgolette, senza i
+    segmenti vuoti. Una barra rovescia protegge il carattere che segue, tranne dentro gli apici."""
+    segmenti, corrente, virgoletta = [], [], None
+    indice = 0
+    while indice < len(comando):
+        carattere = comando[indice]
+        if carattere == "\\" and virgoletta != "'" and indice + 1 < len(comando):
+            corrente.append(comando[indice:indice + 2])
+            indice += 2
+            continue
+        if virgoletta:
+            if carattere == virgoletta:
+                virgoletta = None
+        elif carattere in "\"'":
+            virgoletta = carattere
+        elif carattere in ";|\n" or comando.startswith("&&", indice):
+            segmenti.append("".join(corrente))
+            corrente = []
+            indice += 2 if comando[indice:indice + 2] in ("&&", "||") else 1
+            continue
+        corrente.append(carattere)
+        indice += 1
+    segmenti.append("".join(corrente))
+    return [segmento.strip() for segmento in segmenti if segmento.strip()]
+
+
+def classe_azione(azione):
+    """Se una voce di `azioni` è un tentativo negato di usare il bus o un'azione fuori dal canale.
+
+    È una chiamata al bus negata quando l'esito è il rifiuto di `dontAsk` e ogni segmento del
+    comando è un'assegnazione `NOME=…` oppure un'invocazione del bus — col path, o con una variabile
+    assegnata al path prima nello stesso comando — e almeno uno è un'invocazione: un comando di
+    sole assegnazioni non chiama niente. Un segmento con le virgolette sbilanciate non si legge, e
+    ricade fra le azioni fuori dal canale."""
+    if not azione["esito"].startswith(PREFISSO_RIFIUTO):
+        return AZIONE_FUORI_CANALE
+    variabili_del_bus, invocazioni = set(), 0
+    for segmento in segmenti_del_comando(azione["comando"]):
+        try:
+            parole = shlex.split(segmento)
+        except ValueError:
+            return AZIONE_FUORI_CANALE
+        assegnazione = ASSEGNAZIONE.fullmatch(parole[0]) if len(parole) == 1 else None
+        if assegnazione:
+            if assegnazione.group(2) == str(BUS):
+                variabili_del_bus.add(assegnazione.group(1))
+            else:
+                variabili_del_bus.discard(assegnazione.group(1))
+            continue
+        riferimento = RIFERIMENTO_VARIABILE.fullmatch(parole[0])
+        if parole[0] != str(BUS) and not (riferimento and (riferimento.group(1) or riferimento.group(2)) in variabili_del_bus):
+            return AZIONE_FUORI_CANALE
+        invocazioni += 1
+    return CHIAMATA_BUS_NEGATA if invocazioni else AZIONE_FUORI_CANALE
 
 
 def invia(testo, destinatario):
