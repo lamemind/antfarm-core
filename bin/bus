@@ -183,10 +183,18 @@ def testo_dagli_argomenti(argomenti):
 
 def autorizza(destinatario, verso_sorgente):
     """Identifica il chiamante e controlla nodo, tipo e arco `scrive` verso il destinatario.
-    Restituisce (cartella della partita, mittente, grafo); solleva Rifiuto con partita, mittente
-    e versione già noti nei suoi attributi, per la riga del log."""
+    Restituisce (cartella della partita, mittente, grafo, ora di partenza); solleva Rifiuto con
+    partita, mittente e versione già noti nei suoi attributi, per la riga del log.
+
+    Il grafo si rilegge a ogni comando, quindi una versione scritta dalla regia a partita aperta
+    vale dal comando successivo. Versione e ora di partenza si leggono sotto il lock condiviso:
+    la regia scrive l'ora di entrata in vigore sotto il lock esclusivo, e così un messaggio
+    partito prima del cambio ha sempre un'ora precedente e la versione vecchia."""
     cartella_partita, mittente = identifica()
-    grafo = libgrafo.carica(cartella_partita / "grafo.json")
+    with open(cartella_partita / libgrafo.LOCK_GRAFO, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        grafo = libgrafo.carica(cartella_partita / "grafo.json")
+        partenza = adesso()
     versione = grafo["versione"]
     contesto = {"partita": cartella_partita.name, "mittente": mittente, "versione": versione}
     nodo_destinatario = libgrafo.nodo(grafo, destinatario)
@@ -203,7 +211,7 @@ def autorizza(destinatario, verso_sorgente):
     except Rifiuto as rifiuto:
         rifiuto.contesto = contesto
         raise
-    return cartella_partita, mittente, grafo
+    return cartella_partita, mittente, grafo, partenza
 
 
 def rifiuta(rifiuto, destinatario, testo):
@@ -223,12 +231,12 @@ def comando_send(argomenti):
         print("testo vuoto: niente da consegnare", file=sys.stderr)
         return 2
     try:
-        cartella_partita, mittente, grafo = autorizza(destinatario, verso_sorgente=False)
+        cartella_partita, mittente, grafo, partenza = autorizza(destinatario, verso_sorgente=False)
     except Rifiuto as rifiuto:
         return rifiuta(rifiuto, destinatario, testo)
     partita, versione = cartella_partita.name, grafo["versione"]
     messaggio = {
-        "ts": adesso(), "partita": partita, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "consegnato",
+        "ts": partenza, "partita": partita, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "consegnato",
         "motivo": None, "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
         "parole": len(testo.split()), "pid_chiamante": os.getppid(),
     }
@@ -258,7 +266,7 @@ def comando_scrivi(argomenti):
         print("testo vuoto: niente da scrivere", file=sys.stderr)
         return 2
     try:
-        cartella_partita, mittente, grafo = autorizza(sorgente, verso_sorgente=True)
+        cartella_partita, mittente, grafo, partenza = autorizza(sorgente, verso_sorgente=True)
         try:
             percorso = file_della_sorgente(cartella_partita, libgrafo.nodo(grafo, sorgente))
         except Rifiuto as rifiuto:
@@ -271,7 +279,7 @@ def comando_scrivi(argomenti):
     temporaneo.write_text(testo + "\n", encoding="utf-8")
     os.replace(temporaneo, percorso)
     riga = {
-        "ts": adesso(), "partita": cartella_partita.name, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "scritto",
+        "ts": partenza, "partita": cartella_partita.name, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "scritto",
         "motivo": None, "da": mittente, "a": sorgente, "versione": grafo["versione"], "testo": testo,
         "parole": len(testo.split()), "pid_chiamante": os.getppid(),
     }

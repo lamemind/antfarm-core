@@ -9,6 +9,9 @@ import json
 from pathlib import Path
 
 DIRITTI = ("conosce", "legge", "scrive", "modifica", "spawn")
+# Il file di lock accanto a grafo.json: il bus lo prende condiviso per leggere versione e ora di
+# partenza insieme, la regia esclusivo per scrivere una versione nuova.
+LOCK_GRAFO = ".grafo.lock"
 
 
 def carica(percorso):

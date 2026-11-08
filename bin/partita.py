@@ -10,8 +10,14 @@ se ogni suo segmento chiama il bus e niente dentro esegue altro —, e `azioni_f
 lunghezza. Per un nodo senza transcript, come un nodo script, i due campi valgono null.
 L'harness legge questi campi da nodi.json e non apre mai i transcript: il formato di Claude Code
 si legge solo qui.
+
+Il grafo di una partita può cambiare a partita aperta, e solo la regia lo scrive. `grafo.json` è
+la versione corrente, quella che il bus rilegge a ogni comando; `grafi/v<N>.json` conserva ogni
+versione, la prima compresa, con l'ora in cui è entrata in vigore. Una versione nuova entra solo
+se porta il numero corrente + 1 e `valida-grafo.py` esce 0: altrimenti niente cambia.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -28,6 +34,7 @@ import grafo as libgrafo
 RADICE = libgrafo.radice_orchestra()
 PARTITE = RADICE / "partite"
 BUS = RADICE / "bin" / "bus"
+VALIDATORE_GRAFO = RADICE / "bin" / "valida-grafo.py"
 PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
 TIMEOUT_BASH_MS = 900000
 VARIABILI_DA_NON_PASSARE = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
@@ -59,6 +66,10 @@ def scrivi_json(percorso, dati):
     temporaneo = percorso.with_name(f".{percorso.name}.tmp")
     temporaneo.write_text(json.dumps(dati, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporaneo, percorso)
+
+
+class GrafoRifiutato(Exception):
+    """Una versione nuova del grafo che non può entrare: numero sbagliato o grafo non valido."""
 
 
 class Partita:
@@ -100,6 +111,7 @@ class Partita:
         shutil.copyfile(grafo_sorgente, cartella / "grafo.json")
         partita = cls(cartella)
         partita.prepara_sorgenti()
+        partita.conserva_versione(partita.grafo(), adesso("milliseconds"))
         scrivi_json(partita.file_meta, {"partita": partita.id, "gioco": gioco, "inizio": adesso(), **meta})
         scrivi_json(partita.file_nodi, {
             "partita": partita.id,
@@ -114,6 +126,40 @@ class Partita:
             },
         })
         return partita
+
+    def conserva_versione(self, grafo, in_vigore):
+        """`grafi/v<N>.json`: il grafo di questa versione e l'ora in cui è entrato in vigore. Il
+        replay ne ha bisogno, perché a partita chiusa grafo.json è già l'ultima versione."""
+        cartella_versioni = self.cartella / "grafi"
+        cartella_versioni.mkdir(exist_ok=True)
+        scrivi_json(cartella_versioni / f"v{grafo['versione']}.json", {"in_vigore": in_vigore, "grafo": grafo})
+
+    def scrivi_versione(self, grafo_nuovo):
+        """Sostituisce il grafo della partita con una versione nuova e restituisce l'ora in cui è
+        entrata in vigore. Solleva GrafoRifiutato, e non cambia niente, se il numero non è il
+        corrente + 1 o se `valida-grafo.py` non esce 0 sul grafo nuovo.
+
+        La sostituzione è atomica: il bus legge o la versione vecchia o la nuova, mai un file a
+        metà. Il lock esclusivo tiene insieme l'ora e la sostituzione. La versione entra in
+        `grafi/` prima di `grafo.json`: chi segue la partita trova il file di una versione
+        appena un messaggio la porta."""
+        attesa = self.grafo()["versione"] + 1
+        if grafo_nuovo.get("versione") != attesa:
+            raise GrafoRifiutato(f"versione {grafo_nuovo.get('versione')} invece di {attesa}")
+        candidato = self.cartella / ".grafo-candidato.json"
+        scrivi_json(candidato, grafo_nuovo)
+        try:
+            esito = subprocess.run([str(VALIDATORE_GRAFO), str(candidato)], capture_output=True, text=True)
+        finally:
+            candidato.unlink()
+        if esito.returncode != 0:
+            raise GrafoRifiutato(f"valida-grafo.py esce {esito.returncode}: {esito.stderr.strip()}")
+        with open(self.cartella / libgrafo.LOCK_GRAFO, "a", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            in_vigore = adesso("milliseconds")
+            self.conserva_versione(grafo_nuovo, in_vigore)
+            scrivi_json(self.cartella / "grafo.json", grafo_nuovo)
+        return in_vigore
 
     def file_sorgente(self, id_sorgente):
         """Il file di una sorgente del grafo, al suo percorso relativo alla cartella della partita."""

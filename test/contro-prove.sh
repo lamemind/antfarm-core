@@ -114,6 +114,90 @@ sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 come_nodo A "$BUS" send B "a partita chiusa"
 verifica "partita chiusa: anche un nodo registrato è rifiutato" test $? -ne 0
 
+echo "versione nuova del grafo a partita aperta"
+PARTITA_VERSIONE=$(python3 - "$TMP" "$GRAFO_TELEFONO" <<'PY'
+import copy, hashlib, json, sys
+from pathlib import Path
+
+radice, sorgente = sys.argv[1], sys.argv[2]
+sys.path.insert(0, f"{radice}/bin")
+import partita as libpartita
+
+partita = libpartita.Partita.crea("prova-versione", "prova", sorgente, {})
+base = json.loads(Path(sorgente).read_text(encoding="utf-8"))
+impronta = lambda: hashlib.sha256((partita.cartella / "grafo.json").read_bytes()).hexdigest()
+prima = impronta()
+stesso_numero = copy.deepcopy(base)
+salta_un_numero = copy.deepcopy(base)
+salta_un_numero["versione"] = 3
+arco_senza_nodo = copy.deepcopy(base)
+arco_senza_nodo["versione"] = 2
+arco_senza_nodo["archi"].append({"da": "A", "a": "Z", "diritti": ["scrive"]})
+rifiuti = {}
+for nome, grafo in (("stesso_numero", stesso_numero), ("salta_un_numero", salta_un_numero), ("arco_senza_nodo", arco_senza_nodo)):
+    try:
+        partita.scrivi_versione(grafo)
+        rifiuti[nome] = None
+    except libpartita.GrafoRifiutato as errore:
+        rifiuti[nome] = str(errore)
+Path(radice, "versione-rifiuti.json").write_text(json.dumps({
+    "rifiuti": rifiuti, "impronta_prima": prima, "impronta_dopo": impronta(),
+    "versioni": sorted(file.name for file in (partita.cartella / "grafi").iterdir()),
+    "nascosti": sorted(file.name for file in partita.cartella.iterdir() if file.name.startswith(".") and file.name != libpartita.libgrafo.LOCK_GRAFO),
+}), encoding="utf-8")
+print(partita.cartella)
+PY
+)
+RIFIUTI_VERSIONE=$(cat "$TMP/versione-rifiuti.json")
+PARTITA=$PARTITA_VERSIONE
+verifica "versione non cresciuta → rifiutata" jq -e '.rifiuti.stesso_numero | contains("versione 1 invece di 2")' <<< "$RIFIUTI_VERSIONE"
+verifica "versione che salta un numero → rifiutata" jq -e '.rifiuti.salta_un_numero | contains("versione 3 invece di 2")' <<< "$RIFIUTI_VERSIONE"
+verifica "arco verso un nodo che non esiste → rifiutato da valida-grafo.py" jq -e '.rifiuti.arco_senza_nodo | contains("nodo inesistente")' <<< "$RIFIUTI_VERSIONE"
+verifica "dopo i rifiuti lo sha256 di grafo.json è quello di prima" jq -e '.impronta_prima == .impronta_dopo' <<< "$RIFIUTI_VERSIONE"
+verifica "dopo i rifiuti resta solo la versione 1, nessun candidato nascosto" jq -e '.versioni == ["v1.json"] and .nascosti == []' <<< "$RIFIUTI_VERSIONE"
+verifica "la prima versione sta in grafi/v1.json con la sua ora" jq -e '.grafo.versione == 1 and (.in_vigore | test("T"))' "$PARTITA/grafi/v1.json"
+ID_VERSIONE=$(basename "$PARTITA")
+come_nodo A "$BUS" send B "prima del cambio"
+verifica "prima del cambio A → B porta versione 1" \
+  jq -e -s --arg p "$ID_VERSIONE" 'any(.[]; .partita==$p and .esito=="consegnato" and .da=="A" and .a=="B" and .versione==1)' "$LOG"
+IN_VIGORE=$(python3 - "$TMP" "$PARTITA" "$GRAFO_TELEFONO" <<'PY'
+import copy, json, sys
+from pathlib import Path
+
+radice, cartella, sorgente = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, f"{radice}/bin")
+import partita as libpartita
+
+grafo = json.loads(Path(sorgente).read_text(encoding="utf-8"))
+grafo["versione"] = 2
+grafo["nodi"].append({"id": "E", "tipo": "script", "ruolo": "entra a partita aperta"})
+grafo["archi"] = [arco for arco in grafo["archi"] if (arco["da"], arco["a"]) != ("A", "B")]
+grafo["archi"].append({"da": "A", "a": "E", "diritti": ["conosce", "scrive"]})
+print(libpartita.Partita(cartella).scrivi_versione(grafo))
+PY
+)
+verifica "la versione valida entra: grafo.json porta la 2" jq -e '.versione == 2' "$PARTITA/grafo.json"
+verifica "la versione 2 sta in grafi/v2.json, uguale a grafo.json, con la sua ora" \
+  bash -c "jq -e --arg ora '$IN_VIGORE' '.in_vigore == \$ora' '$PARTITA/grafi/v2.json' && test \"\$(jq -cS .grafo '$PARTITA/grafi/v2.json')\" = \"\$(jq -cS . '$PARTITA/grafo.json')\""
+VISTA_NUOVA=$(come_nodo A "$BUS" vista)
+verifica "bus vista legge la versione nuova al comando successivo" grep -q 'grafo versione 2$' <<< "$VISTA_NUOVA"
+verifica "bus vista: A scrive a E e non più a B" grep -qx 'Puoi scrivere a: E' <<< "$VISTA_NUOVA"
+come_nodo A "$BUS" send B "dopo il cambio"
+codice_tolto=$?
+verifica "un arco tolto dalla versione nuova esce ≠0" test "$codice_tolto" -ne 0
+verifica "A → B dopo il cambio: arco-negato con versione 2" \
+  jq -e -s --arg p "$ID_VERSIONE" 'any(.[]; .partita==$p and .esito=="rifiutato" and .motivo=="arco-negato" and .da=="A" and .a=="B" and .versione==2)' "$LOG"
+come_nodo A "$BUS" send E "sull'arco nuovo"
+verifica "A → E dopo il cambio: consegnato con versione 2" \
+  jq -e -s --arg p "$ID_VERSIONE" 'any(.[]; .partita==$p and .esito=="consegnato" and .da=="A" and .a=="E" and .versione==2)' "$LOG"
+RICEVUTO_DOPO=$(come_nodo B "$BUS" recv --attesa 5)
+verifica "il messaggio partito prima del cambio, letto dopo, conserva la versione 1" grep -q '^messaggio m-[0-9a-f]* da A · grafo v1$' <<< "$RICEVUTO_DOPO"
+verifica "ora e versione coincidono: v1 prima di in_vigore, v2 dopo" \
+  jq -e -s --arg p "$ID_VERSIONE" --arg ora "$IN_VIGORE" '
+    [.[] | select(.partita==$p and .esito=="consegnato")] as $righe
+    | ($righe | length) == 2 and all($righe[]; if .versione == 1 then .ts <= $ora else .ts >= $ora end)' "$LOG"
+sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
+
 echo "sorgente: validatore"
 GRAFI="$ORCHESTRA/test/grafi"
 verifica "grafo con la sorgente bottone valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFI/sorgente.json"
