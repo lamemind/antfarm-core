@@ -93,7 +93,7 @@ def misura(cartella_partita, percorso_registro, percorso_log, osservazione):
         "secondi_quinta": max(secondi_dichiarati) if len(secondi_dichiarati) == len(gioco.NODI) else None,
         "secondi_ultima": max(secondi_dichiarati, default=None),
         "secondi_primo_scambio": misure.secondi_fra(prima_carta, primo_scambio) if prima_carta and primo_scambio else None,
-        "azioni_fuori_bus": {nodo: nodi.get(nodo, {}).get("azioni_fuori_bus") for nodo in gioco.NODI},
+        "azioni": {nodo: nodi.get(nodo, {}).get("azioni") for nodo in gioco.NODI},
         "centralita": centralita(righe, carica_json(cartella_partita / "grafo.json")),
         "messaggi_per_nodo": misure.messaggi_per_nodo(righe, ["regia", *gioco.NODI]),
         "consegnati": sum(1 for riga in righe if riga["esito"] == "consegnato"),
@@ -195,14 +195,7 @@ def componi(misurato, osservazione, percorso_registro, percorso_log):
               "Fonte: log, righe `consegnato` con `da` e `a` fra A–E; grado dalla `grafo.json` della partita, archi `scrive` "
               "verso altri giocatori. Fra più nodi di grado massimo vale quello che riceve di più.", ""]
 
-    azioni = misurato["azioni_fuori_bus"]
-    testo += ["## Azioni fuori bus", "", "| Nodo | Azioni fuori bus |", "| --- | --- |"]
-    testo += [f"| {nodo} | {azioni[nodo] if azioni[nodo] is not None else '—'} |" for nodo in gioco.NODI]
-    testo += ["", "Le chiamate a tool di un nodo che non sono un comando Bash che comincia col path del bus. Con "
-              "`--permission-mode dontAsk` passano solo i comandi di sola lettura dentro la cartella del nodo; gli "
-              "altri sono negati, come `B=<bus>; $B send …`, che la regola `Bash(<bus> *)` non copre. Fonte: regia, "
-              "`nodi.json`, campo `azioni_fuori_bus` di ogni nodo, contato sul transcript alla chiusura.", ""]
-
+    testo += misure.sezione_azioni_fuori_bus(misurato["azioni"])
     testo += misure.sezione_messaggi_per_nodo(misurato["righe"], ["regia", *gioco.NODI])
     testo += misure.sezione_messaggi_per_arco(misurato["righe"])
     testo += misure.sezione_token_per_nodo(osservazione)

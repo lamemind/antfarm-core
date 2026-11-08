@@ -1,8 +1,8 @@
 """Le misure comuni ai rapporti di fine partita: dipendono da registro, log e transcript, non dal gioco.
 
 Ogni gioco scrive il proprio rapporto con le proprie regole, il proprio oracolo e le proprie
-tabelle; le sezioni qui — messaggi per arco, messaggi per nodo, token per nodo, turni umani e
-canale nativo, elenco dei transcript — sono le stesse per ogni gioco, e ognuna porta la sua fonte.
+tabelle; le sezioni qui — azioni fuori bus, messaggi per arco, messaggi per nodo, token per nodo,
+turni umani e canale nativo, elenco dei transcript — non dipendono dal gioco, e ognuna porta la sua fonte.
 Ogni funzione `sezione_*` restituisce le righe markdown della sezione, riga vuota finale compresa.
 """
 
@@ -10,6 +10,8 @@ import json
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+import partita as libpartita
 
 NOMI_USAGE = {
     "input_tokens": "input",
@@ -120,6 +122,31 @@ def sezione_messaggi_per_nodo(righe, nodi):
         testo.append(f"| {nodo} | {voce['inviati']} | {voce['ricevuti']} | {voce['letti']} | {voce['rifiutati']} |")
     testo += ["", "Fonte: log — inviati: righe `consegnato` con `da` = nodo; ricevuti: righe `consegnato` con "
               "`a` = nodo; letti: righe `letto` con `a` = nodo; rifiutati: righe `rifiutato` con `da` = nodo.", ""]
+    return testo
+
+
+def sezione_azioni_fuori_bus(azioni_per_nodo):
+    """Le azioni di ogni nodo divise fra chiamate al bus negate e azioni fuori dal canale, con la
+    riga del totale. `azioni_per_nodo` è nodo → campo `azioni` della voce di nodi.json; `None`, un
+    nodo senza elenco, scrive un trattino e non entra nel totale. La classe di una voce si decide
+    qui, alla composizione: nodi.json resta il dato grezzo."""
+    testo = ["## Azioni fuori bus", "", "| Nodo | Chiamate al bus negate | Azioni fuori dal canale |", "| --- | --- | --- |"]
+    totali = Counter()
+    for nodo, azioni in azioni_per_nodo.items():
+        if azioni is None:
+            testo.append(f"| {nodo} | — | — |")
+            continue
+        classi = Counter(libpartita.classe_azione(azione) for azione in azioni)
+        totali.update(classi)
+        testo.append(f"| {nodo} | {classi[libpartita.CHIAMATA_BUS_NEGATA]} | {classi[libpartita.AZIONE_FUORI_CANALE]} |")
+    testo.append(f"| Totale | {totali[libpartita.CHIAMATA_BUS_NEGATA]} | {totali[libpartita.AZIONE_FUORI_CANALE]} |")
+    testo += ["", "Le chiamate a tool di un nodo che non sono un comando Bash che comincia col path del bus, divise in due. "
+              "**Chiamata al bus negata**: l'esito è il rifiuto di `--permission-mode dontAsk` e ogni segmento del comando — "
+              "spezzato su `;`, `&&`, `||`, `|` e a capo, fuori dalle virgolette — è un'assegnazione di variabile o "
+              "un'invocazione del bus, col path o con la variabile che lo porta, e almeno uno lo invoca: il nodo voleva usare "
+              "il canale, e la regola `Bash(<bus> *)` copre solo i comandi che cominciano col path. **Azione fuori dal "
+              "canale**: ogni altra voce. Fonte: regia, `nodi.json`, campo `azioni` di ogni nodo, classificato alla "
+              "composizione del rapporto.", ""]
     return testo
 
 
