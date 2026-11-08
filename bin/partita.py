@@ -5,8 +5,9 @@ niente all'agente: nodi.json — la coppia (pid, starttime) che il bus confronta
 del chiamante, più sessionId, genitore e compito — e meta.json, i parametri della partita.
 
 A fine partita scrive nella voce di ogni nodo `chiuso`, l'ora al millesimo, `azioni`, l'elenco
-delle chiamate a tool del transcript che non sono un comando Bash del bus, e `azioni_fuori_bus`,
-la sua lunghezza. Per un nodo senza transcript, come un nodo script, i due campi valgono null.
+delle chiamate a tool del transcript che non sono un comando Bash del bus — un comando lo è solo
+se ogni suo segmento chiama il bus e niente dentro esegue altro —, e `azioni_fuori_bus`, la sua
+lunghezza. Per un nodo senza transcript, come un nodo script, i due campi valgono null.
 L'harness legge questi campi da nodi.json e non apre mai i transcript: il formato di Claude Code
 si legge solo qui.
 """
@@ -39,6 +40,9 @@ CHIAMATA_BUS_NEGATA = "chiamata al bus negata"
 AZIONE_FUORI_CANALE = "azione fuori dal canale"
 ASSEGNAZIONE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
 RIFERIMENTO_VARIABILE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
+APERTURA_HEREDOC = re.compile(
+    r"<<(?P<meno>-?)[ \t]*(?:(?P<virgoletta>['\"])(?P<parola_quotata>[^'\"]*)(?P=virgoletta)"
+    r"|\\(?P<parola_protetta>\S+)|(?P<parola_nuda>[^\s;|&<>()'\"\\]+))")
 
 
 def adesso(precisione="seconds"):
@@ -355,26 +359,94 @@ def chiamate_bash(percorso_transcript):
 
 def azioni_del_transcript(percorso_transcript):
     """Le chiamate a tool che non sono un comando Bash del bus, cioè tutto ciò che un nodo fa fuori
-    dal canale, come elenco di voci nell'ordine del transcript.
+    dal canale, come elenco di voci nell'ordine del transcript. Un comando Bash resta fuori solo se
+    passa `comando_del_bus`: basta un segmento che non chiama il bus, o una sostituzione di comando,
+    e il comando entra intero.
 
     Il comando resta intero; l'esito si tronca a LUNGHEZZA_ESITO_AZIONE caratteri, perché può
     contenere il testo di un messaggio. `errore` è null se la chiamata non ha ricevuto risposta,
     come un comando interrotto dalla fermata della sessione."""
     fuori_bus = [chiamata for chiamata in chiamate_bash(percorso_transcript)
-                 if chiamata[0] != "Bash" or not chiamata[1].lstrip().startswith(str(BUS))]
+                 if chiamata[0] != "Bash" or not comando_del_bus(chiamata[1])]
     return [{"ordine": ordine, "tool": nome, "comando": comando, "esito": esito[:LUNGHEZZA_ESITO_AZIONE], "errore": errore}
             for ordine, (nome, comando, esito, errore) in enumerate(fuori_bus, start=1)]
 
 
-def segmenti_del_comando(comando):
-    """Il comando spezzato su `;`, `&&`, `||`, `|` e a capo, fuori dalle virgolette, senza i
-    segmenti vuoti. Una barra rovescia protegge il carattere che segue, tranne dentro gli apici."""
-    segmenti, corrente, virgoletta = [], [], None
+def comando_del_bus(comando):
+    """True se il comando non fa altro che chiamare il bus: ogni segmento comincia col path del bus
+    e niente, nel testo, esegue un altro comando. È il filtro di `azioni`: il comando che non passa
+    entra nell'elenco intero, com'è scritto. Un'assegnazione `B=<bus>` o un `$B send …` non sono
+    il path: il comando entra, e a dire che voleva il bus pensa `classe_azione`."""
+    if esegue_altro_comando(comando):
+        return False
+    segmenti = segmenti_del_comando(comando)
+    return bool(segmenti) and all(invocazione_del_bus(segmento) for segmento in segmenti)
+
+
+def invocazione_del_bus(segmento, variabili_del_bus=frozenset()):
+    """True se la prima parola del segmento è il path del bus, oppure `$NOME` o `${NOME}` di una
+    variabile fra quelle date. Un segmento con le virgolette sbilanciate non si legge: False."""
+    try:
+        parole = shlex.split(segmento)
+    except ValueError:
+        return False
+    if not parole:
+        return False
+    riferimento = RIFERIMENTO_VARIABILE.fullmatch(parole[0])
+    return parole[0] == str(BUS) or bool(riferimento and (riferimento.group(1) or riferimento.group(2)) in variabili_del_bus)
+
+
+def esegue_altro_comando(comando):
+    """True se il comando esegue qualcosa dentro di sé, oltre ai suoi segmenti: `$(…)`, un backtick,
+    `<(…)` o `>(…)` fuori dagli apici singoli, nel testo o nel corpo di un heredoc non quotato.
+    `$((…))` è aritmetica, non un comando. Dentro gli apici singoli e nel corpo di un heredoc
+    quotato niente si espande, e lì questi caratteri sono testo."""
+    testo, corpi = senza_corpi_heredoc(comando)
+    return _sostituzione(testo, con_virgolette=True) or any(_sostituzione(corpo, con_virgolette=False) for corpo in corpi)
+
+
+def _sostituzione(testo, con_virgolette):
+    """Il motore di `esegue_altro_comando`. Con `con_virgolette` legge le virgolette come la shell:
+    gli apici singoli spengono tutto, le doppie lasciano vivi `$(` e il backtick. Senza, è il corpo
+    di un heredoc non quotato: `$(` e backtick vivi ovunque, le virgolette sono caratteri."""
+    virgoletta = None
+    indice = 0
+    while indice < len(testo):
+        carattere = testo[indice]
+        if carattere == "\\" and virgoletta != "'":
+            indice += 2
+            continue
+        if virgoletta == "'":
+            if carattere == "'":
+                virgoletta = None
+        elif con_virgolette and carattere in "\"'" and (virgoletta is None or carattere == virgoletta):
+            virgoletta = None if virgoletta else carattere
+        elif carattere == "`":
+            return True
+        elif testo.startswith("$(", indice) and not testo.startswith("$((", indice):
+            return True
+        elif virgoletta is None and con_virgolette and carattere in "<>" and testo.startswith("(", indice + 1):
+            return True
+        indice += 1
+    return False
+
+
+def senza_corpi_heredoc(comando):
+    """(il comando senza i corpi dei suoi heredoc, i corpi degli heredoc non quotati).
+
+    `<<PAROLA`, `<<-PAROLA`, `<<'PAROLA'`, `<<"PAROLA"` e `<<\\PAROLA` fuori dalle virgolette aprono
+    un heredoc: le righe dopo quella del comando, fino alla riga uguale a PAROLA, sono il testo che
+    il comando legge da stdin, non comandi, e qui spariscono insieme alla riga di chiusura. Il corpo
+    di un heredoc non quotato espande `$(…)` e i backtick, quindi torna a parte perché qualcuno lo
+    guardi; quello quotato o protetto è letterale e non torna. `<<<` è una here-string e non apre
+    niente. Senza riga di chiusura il corpo arriva alla fine del comando."""
+    testo, corpi, pendenti = [], [], []
+    virgoletta = None
     indice = 0
     while indice < len(comando):
         carattere = comando[indice]
         if carattere == "\\" and virgoletta != "'" and indice + 1 < len(comando):
-            corrente.append(comando[indice:indice + 2])
+            testo.append(comando[indice:indice + 2])
             indice += 2
             continue
         if virgoletta:
@@ -382,26 +454,94 @@ def segmenti_del_comando(comando):
                 virgoletta = None
         elif carattere in "\"'":
             virgoletta = carattere
-        elif carattere in ";|\n" or comando.startswith("&&", indice):
-            segmenti.append("".join(corrente))
-            corrente = []
-            indice += 2 if comando[indice:indice + 2] in ("&&", "||") else 1
+        elif comando.startswith("<<", indice) and not comando.startswith("<<<", indice) and comando[indice - 1:indice] != "<":
+            apertura = APERTURA_HEREDOC.match(comando, indice)
+            if apertura:
+                parola = apertura.group("parola_quotata") or apertura.group("parola_protetta") or apertura.group("parola_nuda")
+                letterale = apertura.group("parola_nuda") is None
+                pendenti.append((parola, letterale, apertura.group("meno") == "-"))
+                testo.append(apertura.group(0))
+                indice = apertura.end()
+                continue
+        elif carattere == "\n" and pendenti:
+            testo.append(carattere)
+            indice += 1
+            for parola, letterale, meno in pendenti:
+                righe_corpo = []
+                while indice < len(comando):
+                    fine_riga = comando.find("\n", indice)
+                    riga = comando[indice:] if fine_riga == -1 else comando[indice:fine_riga]
+                    indice = len(comando) if fine_riga == -1 else fine_riga + 1
+                    if (riga.lstrip("\t") if meno else riga) == parola:
+                        break
+                    righe_corpo.append(riga)
+                if not letterale:
+                    corpi.append("\n".join(righe_corpo))
+            pendenti = []
             continue
+        testo.append(carattere)
+        indice += 1
+    return "".join(testo), corpi
+
+
+def segmenti_del_comando(comando):
+    """Il comando spezzato su `;`, `&&`, `||`, `|`, `&` e a capo, fuori dalle virgolette, senza i
+    segmenti vuoti. Una barra rovescia protegge il carattere che segue, tranne dentro gli apici.
+    `&` da solo separa come `;` — manda in background il segmento prima — ma `>&`, `<&` e `&>` sono
+    redirezioni e restano nel segmento. Il corpo di un heredoc non è un segmento: sparisce prima
+    del taglio (`senza_corpi_heredoc`), e la riga che lo apre resta."""
+    testo, _ = senza_corpi_heredoc(comando)
+    segmenti, corrente, virgoletta = [], [], None
+    indice = 0
+    while indice < len(testo):
+        carattere = testo[indice]
+        if carattere == "\\" and virgoletta != "'" and indice + 1 < len(testo):
+            corrente.append(testo[indice:indice + 2])
+            indice += 2
+            continue
+        if virgoletta:
+            if carattere == virgoletta:
+                virgoletta = None
+        elif carattere in "\"'":
+            virgoletta = carattere
+        else:
+            lunghezza = _lunghezza_separatore(testo, indice)
+            if lunghezza:
+                segmenti.append("".join(corrente))
+                corrente = []
+                indice += lunghezza
+                continue
         corrente.append(carattere)
         indice += 1
     segmenti.append("".join(corrente))
     return [segmento.strip() for segmento in segmenti if segmento.strip()]
 
 
+def _lunghezza_separatore(testo, indice):
+    """Quanti caratteri occupa il separatore di segmenti che comincia in `indice`, 0 se lì non ce
+    n'è: 2 per `&&` e `||`, 1 per `;`, `|`, a capo e `&` solo. `>&`, `<&` e `&>` sono redirezioni."""
+    if testo.startswith(("&&", "||"), indice):
+        return 2
+    carattere = testo[indice]
+    if carattere in ";|\n":
+        return 1
+    if carattere == "&":
+        prima = testo[indice - 1] if indice else ""
+        dopo = testo[indice + 1] if indice + 1 < len(testo) else ""
+        return 0 if prima in ("<", ">") or dopo == ">" else 1
+    return 0
+
+
 def classe_azione(azione):
     """Se una voce di `azioni` è un tentativo negato di usare il bus o un'azione fuori dal canale.
 
-    È una chiamata al bus negata quando l'esito è il rifiuto di `dontAsk` e ogni segmento del
-    comando è un'assegnazione `NOME=…` oppure un'invocazione del bus — col path, o con una variabile
-    assegnata al path prima nello stesso comando — e almeno uno è un'invocazione: un comando di
-    sole assegnazioni non chiama niente. Un segmento con le virgolette sbilanciate non si legge, e
-    ricade fra le azioni fuori dal canale."""
-    if not azione["esito"].startswith(PREFISSO_RIFIUTO):
+    È una chiamata al bus negata quando l'esito è il rifiuto di `dontAsk`, niente nel comando
+    esegue un altro comando (`esegue_altro_comando`) e ogni segmento è un'assegnazione `NOME=…`
+    oppure un'invocazione del bus — col path, o con una variabile assegnata al path prima nello
+    stesso comando — e almeno uno è un'invocazione: un comando di sole assegnazioni non chiama
+    niente. Un segmento con le virgolette sbilanciate non si legge, e ricade fra le azioni fuori
+    dal canale."""
+    if not azione["esito"].startswith(PREFISSO_RIFIUTO) or esegue_altro_comando(azione["comando"]):
         return AZIONE_FUORI_CANALE
     variabili_del_bus, invocazioni = set(), 0
     for segmento in segmenti_del_comando(azione["comando"]):
@@ -416,8 +556,7 @@ def classe_azione(azione):
             else:
                 variabili_del_bus.discard(assegnazione.group(1))
             continue
-        riferimento = RIFERIMENTO_VARIABILE.fullmatch(parole[0])
-        if parole[0] != str(BUS) and not (riferimento and (riferimento.group(1) or riferimento.group(2)) in variabili_del_bus):
+        if not invocazione_del_bus(segmento, variabili_del_bus):
             return AZIONE_FUORI_CANALE
         invocazioni += 1
     return CHIAMATA_BUS_NEGATA if invocazioni else AZIONE_FUORI_CANALE

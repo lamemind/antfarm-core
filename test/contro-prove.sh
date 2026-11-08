@@ -245,6 +245,7 @@ voci = {
     "A": {"tipo": "llm", "short_id": "aaaa", "sessionId": "sess-a"},
     "B": {"tipo": "llm", "short_id": "bbbb", "sessionId": "sess-b"},
     "S": {"tipo": "llm", "short_id": "ssss", "sessionId": "sess-sparito"},
+    "C": {"tipo": "llm", "short_id": "cccc", "sessionId": "sess-c"},
 }
 libpartita.scrivi_json(partita.file_nodi, {"partita": "prova-azioni", "stato": "chiusa", "nodi": voci})
 COMANDO_SU_DUE_RIGHE = "echo 'ciao   mondo' | wc -w\n# seconda riga"
@@ -256,9 +257,37 @@ transcript("sess-a", [
     ("assistant", uso(5, "sleep 900")),
 ])
 transcript("sess-b", [("assistant", uso(1, f"{bus} recv")), ("user", esito(1, "messaggio"))])
+# Il filtro guarda il comando intero: un pezzo fuori bus lo fa entrare, una catena di soli bus no.
+ENTRANO = [
+    f"{bus} send A x && cat /etc/hostname",
+    f"{bus} send A x; ls",
+    f"{bus} send A x | tee f",
+    f"{bus} send A x\ncat /etc/hostname",
+    f"{bus} send A \"$(cat /etc/hostname)\"",
+    f"{bus} send A x & cat /etc/hostname",
+    f"{bus} send A `cat /etc/hostname`",
+    f"{bus} send A <<EOF\n$(cat /etc/hostname)\nEOF",
+    f"{bus} send A <(ls)",
+]
+RESTANO_FUORI = [
+    f"{bus} send A x && {bus} send B y",
+    f"{bus} send A \"testo con && dentro\"",
+    f"{bus} send A <<'EOF'\ntesto con && dentro\n$(non eseguito)\nEOF",
+    f"{bus} send A <<EOF\ntesto con && dentro; ls | wc\nEOF",
+    f"{bus} send A x 2>&1",
+    f"{bus} send A x &> /dev/null",
+    f"{bus} send A 'con `backtick` letterale e $(x)'",
+    f"{bus} send A x &&\n  {bus} send B y",
+    f"{bus} send A \"$((1+2))\"",
+]
+blocchi_c = []
+for indice, comando in enumerate(sum(zip(ENTRANO, RESTANO_FUORI), ()), start=1):
+    blocchi_c += [("assistant", uso(indice, comando)), ("user", esito(indice, "esito"))]
+transcript("sess-c", blocchi_c)
 partita.ferma_nodi()
 dopo_chiusura = partita.nodi()["nodi"]
-a, b, s = dopo_chiusura["A"], dopo_chiusura["B"], dopo_chiusura["S"]
+a, b, s, c = dopo_chiusura["A"], dopo_chiusura["B"], dopo_chiusura["S"], dopo_chiusura["C"]
+entrati_c = [azione["comando"] for azione in c["azioni"]]
 
 elenco = a["azioni"]
 senza_transcript = {"azioni": s["azioni"], "conteggio": s["azioni_fuori_bus"]}
@@ -267,6 +296,7 @@ senza_transcript = {"azioni": s["azioni"], "conteggio": s["azioni_fuori_bus"]}
 a.pop("azioni")
 b.pop("azioni")
 s.pop("azioni")
+c.pop("azioni")
 s["azioni_fuori_bus"] = 3
 dopo_chiusura["script"].pop("azioni", None)
 dopo_chiusura["N"] = {"tipo": "llm", "sessionId": "sess-b"}  # voce senza conteggio
@@ -279,6 +309,10 @@ partita.riscrivi_azioni()
 print(json.dumps({
     "elenco": elenco,
     "conteggio_a": a["azioni_fuori_bus"],
+    "c_entrati": entrati_c,
+    "c_attesi": ENTRANO,
+    "c_mancanti": [comando for comando in ENTRANO if comando not in entrati_c],
+    "c_fuori_entrati": [comando for comando in RESTANO_FUORI if comando in entrati_c],
     "comando_atteso": COMANDO_SU_DUE_RIGHE,
     "senza_transcript": senza_transcript,
     "scritte": scritte,
@@ -303,8 +337,13 @@ verifica "l'esito si tronca a 1000 caratteri, errore no" \
   jq -e '.elenco[1].errore == false and (.elenco[1].esito | length) == 1000' <<< "$AZIONI"
 verifica "una chiamata senza risposta: esito vuoto, errore null" \
   jq -e '.elenco[2].esito == "" and .elenco[2].errore == null' <<< "$AZIONI"
+verifica "verso dentro: ogni comando con un pezzo fuori bus entra, intero e in ordine — &&, ;, |, a capo, \$(…), &, backtick, heredoc non quotato, <(…)" \
+  jq -e '.c_mancanti == [] and .c_entrati == .c_attesi' <<< "$AZIONI"
+verifica "verso fuori: catena di soli bus, && nelle virgolette, heredoc, 2>&1, &>, backtick fra apici singoli, \$((…)) restano fuori" \
+  jq -e '.c_fuori_entrati == []' <<< "$AZIONI"
 verifica "riscrittura: stesso elenco della chiusura" jq -e '.riscritto_a == .elenco' <<< "$AZIONI"
-verifica "riscrittura: B con 0 azioni porta l'elenco vuoto" jq -e '.scritte.A == 3 and .scritte.B == 0' <<< "$AZIONI"
+verifica "riscrittura: B con 0 azioni porta l'elenco vuoto, C i suoi entrati" \
+  jq -e '.scritte.A == 3 and .scritte.B == 0 and .scritte.C == (.c_attesi | length)' <<< "$AZIONI"
 verifica "riscrittura: né un nodo script né una voce senza conteggio ricevono l'elenco" \
   jq -e '.script_ha_azioni == false and .senza_conteggio_ha_azioni == false' <<< "$AZIONI"
 verifica "riscrittura: conteggio diverso dall'elenco → problema, voce e conteggio intatti" \
@@ -343,7 +382,12 @@ print(json.dumps({
     "variabile_non_del_bus": classe("B=/bin/cat; $B /etc/hostname"),
     "variabile_riassegnata": classe(f"B={bus}; B=/bin/cat; $B /etc/hostname"),
     "virgolette_sbilanciate": classe(f"{bus} send A \"x"),
+    "sostituzione": classe(f"{bus} send A \"$(cat /etc/hostname)\""),
+    "sostituzione_letterale": classe(f"{bus} send A '$(x)'"),
+    "heredoc_quotato": classe(f"{bus} send A <<'EOF'\n$(x) && ls\nEOF"),
+    "heredoc_con_sostituzione": classe(f"{bus} send A <<EOF\n$(x)\nEOF"),
     "segmenti": libpartita.segmenti_del_comando("a \"b; c\" && d || e | f\ng; 'h\ni';"),
+    "segmenti_heredoc_e_sfondo": libpartita.segmenti_del_comando("cat <<EOF\na; b\nEOF\nls & wc 2>&1 &> f"),
 }, ensure_ascii=False))
 PY
 )
@@ -365,8 +409,14 @@ verifica_classe "X=1 davanti a un comando non è un'assegnazione → fuori dal c
 verifica_classe "\$B assegnata a un altro programma → fuori dal canale" variabile_non_del_bus "$FUORI_CANALE"
 verifica_classe "\$B riassegnata dopo il bus → fuori dal canale" variabile_riassegnata "$FUORI_CANALE"
 verifica_classe "virgolette sbilanciate → fuori dal canale" virgolette_sbilanciate "$FUORI_CANALE"
+verifica_classe "<bus> send A \"\$(cat …)\" negato: la sostituzione esce dal canale → fuori dal canale" sostituzione "$FUORI_CANALE"
+verifica_classe "\$(x) fra apici singoli è testo → chiamata al bus negata" sostituzione_letterale "$BUS_NEGATA"
+verifica_classe "heredoc quotato con \$(x) && ls nel corpo → chiamata al bus negata" heredoc_quotato "$BUS_NEGATA"
+verifica_classe "heredoc non quotato con \$(x) nel corpo → fuori dal canale" heredoc_con_sostituzione "$FUORI_CANALE"
 verifica "lo spezzatore divide fuori dalle virgolette e scarta i vuoti" \
   jq -e '.segmenti == ["a \"b; c\"", "d", "e", "f", "g", "'"'"'h\ni'"'"'"]' <<< "$CLASSI"
+verifica "lo spezzatore salta il corpo di un heredoc, taglia su & solo e tiene 2>&1 e &>" \
+  jq -e '.segmenti_heredoc_e_sfondo == ["cat <<EOF", "ls", "wc 2>&1 &> f"]' <<< "$CLASSI"
 
 echo "oracolo del telefono"
 ORACOLO=$(python3 - "$ORCHESTRA/giochi/telefono" <<'PY'
