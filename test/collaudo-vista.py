@@ -19,6 +19,10 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
 - spawn sintetico (test/flussi/spawn.jsonl, harness in modo flusso): il figlio compare fra i nodi,
   gli archi del delta fra gli archi — genitore → figlio compreso —, la testata porta la versione
   del delta, e i messaggi da e verso il figlio corrono sugli archi nati dallo spawn
+- grafo cambiato sintetico (test/flussi/grafo-cambiato.jsonl, harness in modo flusso): dopo l'evento
+  ci sono i nodi del grafo nuovo, l'arco tolto non c'è più, gli archi nuovi sì, la testata porta la
+  versione nuova; i pallini già corsi sull'arco tolto restano fermi sul loro destinatario, e quelli
+  dopo il cambio corrono sugli archi nuovi
 - bottone a secco (copione boom): il nodo umano e la sorgente compaiono coi loro tipi; una riga
   `scritto` del log è un pallino [data-esito=scritto] che corre sull'arco A → bottone e si ferma
   sulla sorgente, e il clic porta il testo della riga
@@ -47,6 +51,7 @@ PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
 PARTITA_SORGENTE = "2026-11-08-001923-bottone-a-secco-boom"
 FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
+FLUSSO_GRAFO_CAMBIATO = ORCHESTRA / "test" / "flussi" / "grafo-cambiato.jsonl"
 PARTITA_AZIONI = "2026-10-27-115351-telefono-riformula"
 BUS = ORCHESTRA / "bin" / "bus"
 PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
@@ -219,6 +224,50 @@ def scenario_spawn(pagina, schermate, _log):
             pagina.screenshot(path=str(schermate / "vista-spawn-sintetico.png"))
 
 
+def verifica_grafo_cambiato(dom, grafo_nuovo, delta, consegnati):
+    """Il DOM dopo un grafo-cambiato: nodi e archi della versione nuova, ogni pallino fermo sul suo
+    destinatario. Un pallino sull'arco tolto non ha più la corsa; gli altri corrono sul proprio arco."""
+    tolti = {f"{arco['da']}→{arco['a']}" for arco in delta["archi_tolti"]}
+    verifica(f"[data-nodo] = nodi della versione nuova ({len(grafo_nuovo['nodi'])})",
+             sorted(dom["nodi"]) == sorted(nodo["id"] for nodo in grafo_nuovo["nodi"]), f"{sorted(dom['nodi'])}")
+    verifica("[data-arco] = archi della versione nuova",
+             sorted(dom["archi"]) == sorted(f"{arco['da']}→{arco['a']}" for arco in grafo_nuovo["archi"]), f"{sorted(dom['archi'])}")
+    for arco in delta["archi_tolti"]:
+        verifica(f"nessun [data-arco] per {arco['da']} → {arco['a']}", f"{arco['da']}→{arco['a']}" not in dom["archi"])
+    for arco in delta["archi_aggiunti"]:
+        verifica(f"un [data-arco] per {arco['da']} → {arco['a']}", f"{arco['da']}→{arco['a']}" in dom["archi"])
+    verifica(f"la testata porta la versione {grafo_nuovo['versione']}", dom["versione"].startswith(f"v{grafo_nuovo['versione']} "), dom["versione"])
+    pallini = [p for p in dom["pallini"] if p["esito"] == "consegnato"]
+    verifica(f"un pallino per messaggio consegnato ({len(consegnati)})", len(pallini) == len(consegnati), f"{len(pallini)} nel DOM")
+    for pallino in pallini:
+        riga = pallino["evento"]["riga"]
+        chiave = f"{riga['da']}→{riga['a']}"
+        fermo_su = nodo_piu_vicino(dom["nodi"], pallino["posizione"])
+        destino = dom["nodi"][riga["a"]]
+        distanza = math.dist((destino["x"], destino["y"]), (pallino["posizione"]["x"], pallino["posizione"]["y"]))
+        corsa_giusta = pallino["corsa"] is None if chiave in tolti else pallino["corsa"] == f"#{dom['archi'].get(chiave)}"
+        verifica(f"pallino {pallino['chiave']} ({chiave}, v{riga['versione']}): fermo su {riga['a']}",
+                 corsa_giusta and fermo_su == riga["a"] and distanza <= destino["raggio"] * 1.4,
+                 f"corsa {pallino['corsa']}, nodo più vicino {fermo_su}, distanza {distanza:.0f}px")
+
+
+def scenario_grafo_cambiato(pagina, schermate, _log):
+    print(f"grafo cambiato sintetico {FLUSSO_GRAFO_CAMBIATO.relative_to(ORCHESTRA)}")
+    eventi = [json.loads(testo) for testo in FLUSSO_GRAFO_CAMBIATO.read_text(encoding="utf-8").split("\n") if testo.strip()]
+    cambio = next(evento for evento in eventi if evento["tipo"] == "grafo-cambiato")
+    consegnati = [evento for evento in eventi if evento["tipo"] == "consegnato"]
+    with Harness("flusso", FLUSSO_GRAFO_CAMBIATO, "--velocita", VELOCITA_REPLAY) as harness:
+        apri_e_attendi(pagina, harness.indirizzo)
+        dom = misura_dom(pagina)
+        verifica_grafo_cambiato(dom, cambio["riga"]["grafo"], cambio["delta"], consegnati)
+        rifiuti = [p for p in dom["pallini"] if p["esito"] == "rifiutato"]
+        verifica("il rifiuto dopo il cambio è un segno fermo sul mittente C",
+                 len(rifiuti) == 1 and rifiuti[0]["corsa"] is None and nodo_piu_vicino(dom["nodi"], rifiuti[0]["posizione"]) == "C",
+                 f"{[(p['chiave'], p['corsa']) for p in rifiuti]}")
+        if schermate:
+            pagina.screenshot(path=str(schermate / "vista-grafo-cambiato.png"))
+
+
 def scenario_sorgente(pagina, schermate, log):
     print(f"bottone a secco {PARTITA_SORGENTE}")
     grafo = json.loads((ORCHESTRA / "partite" / PARTITA_SORGENTE / "grafo.json").read_text(encoding="utf-8"))
@@ -312,7 +361,7 @@ def main():
     log = righe_del_log()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_sorgente, scenario_azioni):
+        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_grafo_cambiato, scenario_sorgente, scenario_azioni):
             pagina = browser.new_page(viewport={"width": 1400, "height": 900})
             errori_pagina = []
             pagina.on("pageerror", lambda errore: errori_pagina.append(str(errore)))

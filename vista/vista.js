@@ -6,8 +6,9 @@
 // spegne ma non lo toglie. Una scrittura in una sorgente è un pallino uguale, verde, che corre
 // verso la sorgente e porta data-esito="scritto": nessuno la legge, quindi resta acceso. Un rifiuto
 // è un segno fermo sul nodo mittente: non ha un arco su cui correre. Ogni pallino e ogni segno
-// porta l'evento grezzo nell'attributo data-evento, e il clic lo mostra così com'è arrivato. La
-// pagina non scrive niente verso l'harness.
+// porta l'evento grezzo nell'attributo data-evento, e il clic lo mostra così com'è arrivato. Uno
+// spawn e un grafo-cambiato applicano il loro delta e ricalcolano il cerchio. La pagina non scrive
+// niente verso l'harness.
 
 "use strict";
 
@@ -66,6 +67,10 @@ function descrivi(evento) {
     return `${evento.tipo} ${riga.da ?? "?"} → ${riga.a ?? "?"}${motivo}`;
   }
   if (evento.classe === "spawn") return `spawn ${evento.genitore} → ${evento.figlio.id} · ${evento.template}`;
+  if (evento.tipo === "grafo-cambiato") {
+    const { versione, nodi_aggiunti: nodi, archi_aggiunti: aggiunti, archi_tolti: tolti } = evento.delta;
+    return `grafo-cambiato v${versione} · +${nodi.length} nodi · +${aggiunti.length} −${tolti.length} archi`;
+  }
   if (evento.nodo) return `${evento.tipo} ${evento.nodo}`;
   return `${evento.tipo} ${evento.partita}`;
 }
@@ -106,9 +111,11 @@ function versore(dx, dy) {
 }
 
 // Curva quadratica da bordo a bordo, piegata a sinistra del verso: A → B e B → A non si sovrappongono.
-function geometriaArco(da, a) {
+// null se manca un estremo o se i due nodi coincidono.
+function puntiArco(da, a) {
   const origine = stato.nodi.get(da);
   const destino = stato.nodi.get(a);
+  if (!origine || !destino) return null;
   const dx = destino.x - origine.x;
   const dy = destino.y - origine.y;
   const lunghezza = Math.hypot(dx, dy);
@@ -116,11 +123,18 @@ function geometriaArco(da, a) {
     x: (origine.x + destino.x) / 2 - dy * CURVATURA,
     y: (origine.y + destino.y) / 2 + dx * CURVATURA,
   };
-  if (lunghezza === 0) return "";
+  if (lunghezza === 0) return null;
   const uscita = versore(controllo.x - origine.x, controllo.y - origine.y);
   const entrata = versore(controllo.x - destino.x, controllo.y - destino.y);
   const inizio = { x: origine.x + uscita.x * RAGGIO_NODO, y: origine.y + uscita.y * RAGGIO_NODO };
   const fine = { x: destino.x + entrata.x * (RAGGIO_NODO + 3), y: destino.y + entrata.y * (RAGGIO_NODO + 3) };
+  return { inizio, controllo, fine };
+}
+
+function geometriaArco(da, a) {
+  const punti = puntiArco(da, a);
+  if (!punti) return "";
+  const { inizio, controllo, fine } = punti;
   return `M ${inizio.x.toFixed(1)} ${inizio.y.toFixed(1)} Q ${controllo.x.toFixed(1)} ${controllo.y.toFixed(1)} ${fine.x.toFixed(1)} ${fine.y.toFixed(1)}`;
 }
 
@@ -168,7 +182,7 @@ function disegnaArco(voce) {
   const percorso = elementoSvg("path", { class: "arco", id: `arco-${++stato.contatoreArchi}`, "marker-end": "url(#freccia)" });
   const presa = elementoSvg("path", { class: "arco-presa" });
   gruppo.append(percorso, presa);
-  const arco = { voce, elemento: gruppo, percorso, eventi: [] };
+  const arco = { voce, elemento: gruppo, percorso, eventi: [], pallini: [] };
   gruppo.addEventListener("click", () => mostra(`arco · ${chiave}`, { arco: voce, messaggi: arco.eventi }, gruppo));
   strati.archi.append(gruppo);
   stato.archi.set(chiave, arco);
@@ -220,6 +234,51 @@ function applicaSpawn(evento) {
     figlio.elemento.classList.add("nato-da-spawn");
   }
 }
+
+// Un cambio del grafo scritto dalla regia a partita aperta: la vista applica il delta dell'evento.
+// I pallini già corsi su un arco tolto restano accesi sul loro destinatario: l'animazione segue il
+// percorso dell'arco, quindi con l'arco se ne va anche lei, e il pallino si ferma nel punto d'arrivo.
+function applicaGrafoCambiato(evento) {
+  const delta = evento.delta;
+  const orfani = [];
+  for (const voce of delta.archi_tolti) {
+    const chiave = chiaveArco(voce.da, voce.a);
+    const arco = stato.archi.get(chiave);
+    if (!arco) continue;
+    const arrivo = puntiArco(voce.da, voce.a)?.fine;
+    orfani.push(...arco.pallini.map((pallino) => ({ pallino, voce, arrivo })));
+    arco.elemento.remove();
+    stato.archi.delete(chiave);
+  }
+  for (const voce of delta.nodi_tolti) {
+    stato.nodi.get(voce.id)?.elemento.remove();
+    stato.nodi.delete(voce.id);
+  }
+  const archiTolti = new Set(delta.archi_tolti.map((voce) => chiaveArco(voce.da, voce.a)));
+  const nodiTolti = new Set(delta.nodi_tolti.map((voce) => voce.id));
+  stato.grafo.archi = stato.grafo.archi.filter((voce) => !archiTolti.has(chiaveArco(voce.da, voce.a)));
+  stato.grafo.nodi = stato.grafo.nodi.filter((voce) => !nodiTolti.has(voce.id));
+  for (const voce of delta.nodi_aggiunti) {
+    stato.grafo.nodi.push(voce);
+    disegnaNodo(voce);
+    const nodo = stato.nodi.get(voce.id);
+    nodo.eventi.push(evento);
+    nodo.elemento.classList.add("entrato");
+  }
+  for (const voce of delta.archi_aggiunti) {
+    stato.grafo.archi.push(voce);
+    disegnaArco(voce);
+  }
+  stato.grafo.versione = delta.versione;
+  aggiornaGeometria();
+  testoVersione();
+  for (const { pallino, voce, arrivo } of orfani) {
+    const punto = puntiArco(voce.da, voce.a)?.fine ?? arrivo;
+    pallino.querySelector("animateMotion")?.remove();
+    if (punto) pallino.setAttribute("transform", `translate(${punto.x.toFixed(1)} ${punto.y.toFixed(1)})`);
+    pallino.setAttribute("data-arrivato", "");
+  }
+}
 // </editor-fold>
 
 // <editor-fold desc="Messaggi: pallini e rifiuti">
@@ -246,6 +305,7 @@ function pallinoConsegnato(evento) {
     return;
   }
   arco.eventi.push(evento);
+  arco.pallini.push(pallino);
   const corsa = elementoSvg("animateMotion", { dur: `${DURATA_CORSA_S}s`, fill: "freeze", begin: "indefinite", calcMode: "paced" });
   const traccia = elementoSvg("mpath", { href: `#${arco.percorso.id}` });
   corsa.append(traccia);
@@ -300,6 +360,10 @@ function gestisci(evento) {
   if (evento.partita !== stato.partita) return;
   if (evento.classe === "spawn") {
     applicaSpawn(evento);
+    return;
+  }
+  if (evento.tipo === "grafo-cambiato") {
+    applicaGrafoCambiato(evento);
     return;
   }
   if (evento.classe === "messaggio") {

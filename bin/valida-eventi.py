@@ -8,7 +8,8 @@
 Controlla ogni evento contro schema/evento.schema.json — che rimanda a schema/grafo.schema.json
 per nodi, archi e grafo — e contro la coerenza fra involucro e riga che lo schema non esprime:
 stessa partita, stesso esito, stesso ts nell'involucro e nella riga sorgente; per lo spawn, il
-figlio fra i nodi del delta e un arco dal genitore al figlio fra gli archi. Sul flusso intero:
+figlio fra i nodi del delta e un arco dal genitore al figlio fra gli archi; per grafo-cambiato, il
+delta coerente col grafo della versione nuova. Sul flusso intero:
 nessun messaggio emesso due volte, cioè nessuna coppia (partita, indice) ripetuta.
 
 Uso:  orchestra/bin/valida-eventi.py <eventi.jsonl>     un evento JSON per riga, come lo emette l'harness
@@ -43,6 +44,34 @@ def errori_di_forma(validatore_eventi, evento):
         yield f"forma: {posizione}: {errore.message}"
 
 
+def errori_del_grafo_cambiato(evento):
+    """Il delta contro il file della versione nuova: stessa versione, stessa ora, ogni voce
+    aggiunta presente nel grafo, ogni voce tolta assente — salvo quelle tolte e riaggiunte."""
+    riga, delta = evento["riga"], evento["delta"]
+    grafo = riga["grafo"]
+    if riga["in_vigore"] != evento["ts"]:
+        yield f"ts dell'involucro {evento['ts']} ≠ in_vigore della riga {riga['in_vigore']}"
+    if grafo["versione"] != delta["versione"]:
+        yield f"versione del delta {delta['versione']} ≠ versione del grafo {grafo['versione']}"
+    id_nodi = {nodo["id"] for nodo in grafo["nodi"]}
+    coppie = {(arco["da"], arco["a"]) for arco in grafo["archi"]}
+    for nodo in delta["nodi_aggiunti"]:
+        if nodo["id"] not in id_nodi:
+            yield f"il nodo aggiunto {nodo['id']} non è nel grafo"
+    for arco in delta["archi_aggiunti"]:
+        if (arco["da"], arco["a"]) not in coppie:
+            yield f"l'arco aggiunto {arco['da']} → {arco['a']} non è nel grafo"
+    riaggiunti = {nodo["id"] for nodo in delta["nodi_aggiunti"]}
+    for nodo in delta["nodi_tolti"]:
+        if nodo["id"] in id_nodi and nodo["id"] not in riaggiunti:
+            yield f"il nodo tolto {nodo['id']} è ancora nel grafo"
+    riaggiunte = {(arco["da"], arco["a"]) for arco in delta["archi_aggiunti"]}
+    for arco in delta["archi_tolti"]:
+        coppia = (arco["da"], arco["a"])
+        if coppia in coppie and coppia not in riaggiunte:
+            yield f"l'arco tolto {arco['da']} → {arco['a']} è ancora nel grafo"
+
+
 def errori_di_coerenza(evento):
     riga = evento["riga"]
     classe, tipo = evento["classe"], evento["tipo"]
@@ -67,6 +96,8 @@ def errori_di_coerenza(evento):
         campo = "lanciato" if tipo == "nodo-lanciato" else "chiuso"
         if riga.get(campo) != evento["ts"]:
             yield f"ts dell'involucro {evento['ts']} ≠ {campo} della voce del nodo {riga.get(campo)}"
+    elif tipo == "grafo-cambiato":
+        yield from errori_del_grafo_cambiato(evento)
     elif classe == "spawn":
         figlio, genitore, delta = evento["figlio"]["id"], evento["genitore"], evento["delta"]
         if figlio not in [nodo["id"] for nodo in delta["nodi"]]:

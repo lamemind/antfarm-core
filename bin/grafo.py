@@ -47,5 +47,28 @@ def destinatari(grafo, da, diritto):
     return [arco["a"] for arco in archi_uscenti(grafo, da) if diritto in arco["diritti"]]
 
 
+def delta(prima, dopo):
+    """Cosa cambia fra due versioni del grafo: nodi e archi aggiunti e tolti, voci intere, nell'ordine
+    dei file, più la versione nuova. Un arco che cambia i diritti, o un nodo che cambia un campo,
+    compare fra i tolti e fra gli aggiunti, così il delta non perde niente."""
+    def chiave_nodo(voce):
+        return json.dumps(voce, sort_keys=True, ensure_ascii=False)
+
+    def chiave_arco(voce):
+        return voce["da"], voce["a"], frozenset(voce["diritti"])
+
+    def differenza(voci, altre, chiave):
+        presenti = {chiave(voce) for voce in altre}
+        return [voce for voce in voci if chiave(voce) not in presenti]
+
+    return {
+        "versione": dopo["versione"],
+        "nodi_aggiunti": differenza(dopo["nodi"], prima["nodi"], chiave_nodo),
+        "nodi_tolti": differenza(prima["nodi"], dopo["nodi"], chiave_nodo),
+        "archi_aggiunti": differenza(dopo["archi"], prima["archi"], chiave_arco),
+        "archi_tolti": differenza(prima["archi"], dopo["archi"], chiave_arco),
+    }
+
+
 def radice_orchestra():
     return Path(__file__).resolve().parent.parent

@@ -267,7 +267,7 @@ class Partita:
             "genitore": {"nodo": "regia", "pid": os.getpid()},
             "compito": compito,
             "prompt": file_prompt.name,
-            "lanciato": adesso(),
+            "lanciato": adesso("milliseconds"),
             "comando": [parte if parte != prompt else f"<{file_prompt.name}>" for parte in comando],
         }
         self.registra(id_nodo, dati)
@@ -290,7 +290,7 @@ class Partita:
             "cwd": str(cwd),
             "genitore": {"nodo": "regia", "pid": os.getpid()},
             "compito": compito,
-            "lanciato": adesso(),
+            "lanciato": adesso("milliseconds"),
             "comando": [str(parte) for parte in comando],
         })
         processo.stdin.write("via\n")

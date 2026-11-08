@@ -98,7 +98,7 @@ aside section { padding: 12px 16px; min-height: 0; }
 .nodo.lanciato circle { fill: #1b2233; }
 .nodo.chiuso circle { stroke-dasharray: 5 4; }
 .nodo.selezionato circle { stroke: var(--selezione); }
-.nodo.nato-da-spawn circle { animation: nascita 1.2s ease-out 2; }
+.nodo.nato-da-spawn circle, .nodo.entrato circle { animation: nascita 1.2s ease-out 2; }
 @keyframes nascita {
   0% { stroke-width: 10; }
   100% { stroke-width: 2.5; }

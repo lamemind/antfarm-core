@@ -21,11 +21,12 @@
         collaudo di ciò che il motore non produce ancora, come lo spawn.
 
 Tre classi di evento, schema in schema/evento.schema.json: sessione (partita-aperta,
-partita-chiusa, nodo-lanciato, nodo-chiuso, da meta.json e nodi.json), messaggio (consegnato,
-rifiutato, letto, scritto: le quattro specie di riga del log dei messaggi), spawn. Ogni evento avvolge la riga
-sorgente intatta nel campo `riga`; partita-aperta porta meta.json e grafo.json della partita, e la
-vista disegna da lì. Le righe del log senza partita (mittente-ignoto) non diventano eventi: si
-contano, e il conteggio esce su stderr alla chiusura.
+partita-chiusa, nodo-lanciato, nodo-chiuso, da meta.json e nodi.json; grafo-cambiato, da grafi/),
+messaggio (consegnato, rifiutato, letto, scritto: le quattro specie di riga del log dei messaggi),
+spawn. Ogni evento avvolge la riga sorgente intatta nel campo `riga`; partita-aperta porta meta.json
+e la prima versione del grafo della partita, e la vista disegna da lì; grafo-cambiato porta il file
+della versione nuova e, in cima, il delta rispetto alla precedente. Le righe del log senza partita
+(mittente-ignoto) non diventano eventi: si contano, e il conteggio esce su stderr alla chiusura.
 
 Una porta sola, legata a 127.0.0.1: `/` serve la vista, `/canale.json` il modo e la velocità,
 `/eventi` il WebSocket. Il WebSocket rifiuta le pagine d'altra origine, perché il log porta il
@@ -63,9 +64,10 @@ FILE_VISTA = {
     "/vista.js": ("vista.js", "text/javascript; charset=utf-8"),
     "/vista.css": ("vista.css", "text/css; charset=utf-8"),
 }
-# A parità di ts, l'ordine del ciclo di vita: lancio prima dei messaggi, chiusura dopo.
-PRIORITA_A_PARI_TS = {"nodo-lanciato": 0, "consegnato": 1, "rifiutato": 1, "letto": 1, "scritto": 1, "spawn": 1,
-                      "nodo-chiuso": 2}
+# A parità di ts, l'ordine del ciclo di vita: il grafo nuovo prima del lancio del nodo che ci entra,
+# il lancio prima dei messaggi, la chiusura dopo.
+PRIORITA_A_PARI_TS = {"grafo-cambiato": -1, "nodo-lanciato": 0, "consegnato": 1, "rifiutato": 1, "letto": 1, "scritto": 1,
+                      "spawn": 1, "nodo-chiuso": 2}
 
 
 # <editor-fold defaultstate="collapsed" desc="Sorgenti: file del motore → eventi">
@@ -110,6 +112,25 @@ def evento_partita_chiusa(cartella, meta):
     return {"classe": "sessione", "tipo": "partita-chiusa", "ts": meta["fine"], "partita": cartella.name, "riga": meta}
 
 
+def versioni_del_grafo(cartella):
+    """Le voci di grafi/v<N>.json della partita, in ordine di versione. Una partita nata prima di
+    grafi/ dà la lista vuota."""
+    voci = [leggi_json(percorso) for percorso in (cartella / "grafi").glob("v*.json")]
+    return sorted((voce for voce in voci if voce is not None), key=lambda voce: voce["grafo"]["versione"])
+
+
+def grafo_iniziale(cartella):
+    """Il grafo con cui la partita si è aperta: la prima versione conservata, oppure grafo.json per
+    una partita nata prima di grafi/, che non ha mai cambiato grafo."""
+    versioni = versioni_del_grafo(cartella)
+    return versioni[0]["grafo"] if versioni else leggi_json(cartella / "grafo.json")
+
+
+def evento_grafo_cambiato(cartella, precedente, voce):
+    return {"classe": "sessione", "tipo": "grafo-cambiato", "ts": voce["in_vigore"], "partita": cartella.name,
+            "delta": libgrafo.delta(precedente["grafo"], voce["grafo"]), "riga": voce}
+
+
 def evento_nodo(tipo, cartella, id_nodo, voce):
     campo = "lanciato" if tipo == "nodo-lanciato" else "chiuso"
     return {"classe": "sessione", "tipo": tipo, "ts": voce[campo], "partita": cartella.name, "nodo": id_nodo,
@@ -138,12 +159,15 @@ def cartella_partita(argomento):
 
 
 def eventi_partita(cartella, righe_partita):
-    """Gli eventi di una partita chiusa nell'ordine del replay: apertura, poi lanci, messaggi e
-    chiusure dei nodi in ordine di ts, poi la chiusura della partita. Apertura e chiusura stanno
-    agli estremi perché meta.json porta i secondi e il log i millesimi: la chiusura troncata al
-    secondo cadrebbe prima dell'ultima lettura."""
-    meta, grafo = leggi_json(cartella / "meta.json"), leggi_json(cartella / "grafo.json")
-    centro = eventi_dei_nodi(cartella, leggi_json(cartella / "nodi.json"))
+    """Gli eventi di una partita chiusa nell'ordine del replay: apertura col grafo della prima
+    versione, poi cambi di grafo, lanci, messaggi e chiusure dei nodi in ordine di ts, poi la
+    chiusura della partita. Apertura e chiusura stanno agli estremi perché meta.json porta i
+    secondi e il log i millesimi: la chiusura troncata al secondo cadrebbe prima dell'ultima
+    lettura."""
+    meta, grafo = leggi_json(cartella / "meta.json"), grafo_iniziale(cartella)
+    versioni = versioni_del_grafo(cartella)
+    centro = [evento_grafo_cambiato(cartella, precedente, voce) for precedente, voce in zip(versioni, versioni[1:])]
+    centro += eventi_dei_nodi(cartella, leggi_json(cartella / "nodi.json"))
     centro += [evento_messaggio(indice, riga) for indice, riga in righe_partita]
     centro.sort(key=lambda evento: (istante(evento["ts"]), PRIORITA_A_PARI_TS[evento["tipo"]]))
     chiusura = [evento_partita_chiusa(cartella, meta)] if meta.get("fine") else []
@@ -197,8 +221,9 @@ async def rigioca(connessione, eventi_programmati):
 
 # <editor-fold defaultstate="collapsed" desc="Dal vivo: coda del log e cartelle delle partite">
 class Seguita:
-    def __init__(self, cartella):
+    def __init__(self, cartella, versione):
         self.cartella = cartella
+        self.versione = versione
         self.lanciati = set()
         self.chiusi = set()
         self.chiusa = False
@@ -261,12 +286,22 @@ class Diretta:
         if partita in self.seguite:
             return self.seguite[partita]
         cartella = PARTITE / partita
-        meta, grafo = leggi_json(cartella / "meta.json"), leggi_json(cartella / "grafo.json")
+        meta, grafo = leggi_json(cartella / "meta.json"), grafo_iniziale(cartella)
         if meta is None or grafo is None:
             return None
-        seguita = self.seguite[partita] = Seguita(cartella)
+        seguita = self.seguite[partita] = Seguita(cartella, grafo["versione"])
         self.pubblica(evento_partita_aperta(cartella, meta, grafo))
         return seguita
+
+    def aggiorna_grafi(self, seguita):
+        """Le versioni comparse in grafi/, ognuna col delta dalla precedente. Gira prima di
+        emettere un messaggio, e `grafi/v<N>.json` esiste prima che un messaggio porti N: il
+        client ha già l'arco su cui il pallino deve correre."""
+        versioni = versioni_del_grafo(seguita.cartella)
+        for precedente, voce in zip(versioni, versioni[1:]):
+            if voce["grafo"]["versione"] > seguita.versione:
+                seguita.versione = voce["grafo"]["versione"]
+                self.pubblica(evento_grafo_cambiato(seguita.cartella, precedente, voce))
 
     def aggiorna_lanci(self, seguita):
         nodi = leggi_json(seguita.cartella / "nodi.json")
@@ -288,6 +323,7 @@ class Diretta:
             if seguita is None:
                 self.senza_cartella += 1
                 continue
+            self.aggiorna_grafi(seguita)
             self.aggiorna_lanci(seguita)
             self.pubblica(evento_messaggio(indice, riga))
 
@@ -295,6 +331,7 @@ class Diretta:
         seguita = self.apri(partita)
         if seguita is None or seguita.chiusa:
             return
+        self.aggiorna_grafi(seguita)
         nodi = self.aggiorna_lanci(seguita)
         chiusure = [evento for evento in eventi_dei_nodi(seguita.cartella, nodi)
                     if evento["tipo"] == "nodo-chiuso" and evento["nodo"] not in seguita.chiusi]

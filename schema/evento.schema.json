@@ -57,10 +57,11 @@
       }
     },
     "sessione": {
-      "description": "Ciclo di vita di partita e nodi, letto da meta.json e nodi.json che scrive la regia.",
+      "description": "Ciclo di vita di partita, nodi e grafo, letto da meta.json, nodi.json e grafi/ che scrive la regia.",
       "properties": {
-        "tipo": {"enum": ["partita-aperta", "partita-chiusa", "nodo-lanciato", "nodo-chiuso"]},
-        "nodo": {"$ref": "grafo.schema.json#/$defs/id"}
+        "tipo": {"enum": ["partita-aperta", "partita-chiusa", "nodo-lanciato", "nodo-chiuso", "grafo-cambiato"]},
+        "nodo": {"$ref": "grafo.schema.json#/$defs/id"},
+        "delta": {"$ref": "#/$defs/delta-grafo"}
       },
       "allOf": [
         {
@@ -93,8 +94,38 @@
             "description": "riga è meta.json a partita chiusa.",
             "properties": {"riga": {"allOf": [{"$ref": "#/$defs/meta"}, {"required": ["fine"]}]}}
           }
+        },
+        {
+          "if": {"properties": {"tipo": {"const": "grafo-cambiato"}}, "required": ["tipo"]},
+          "then": {
+            "description": "riga è il file grafi/v<N>.json della versione nuova, scritto dalla regia: il grafo e l'ora in cui è entrato in vigore. delta dice cosa cambia rispetto alla versione precedente.",
+            "required": ["delta"],
+            "properties": {"riga": {
+              "type": "object",
+              "required": ["in_vigore", "grafo"],
+              "additionalProperties": false,
+              "properties": {
+                "in_vigore": {"$ref": "#/$defs/ts"},
+                "grafo": {"$ref": "grafo.schema.json"}
+              }
+            }}
+          },
+          "else": {"not": {"required": ["delta"]}}
         }
       ]
+    },
+    "delta-grafo": {
+      "description": "Cosa cambia fra due versioni del grafo. Un arco che cambia i diritti, o un nodo che cambia un campo, sta fra i tolti e fra gli aggiunti.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["versione", "nodi_aggiunti", "nodi_tolti", "archi_aggiunti", "archi_tolti"],
+      "properties": {
+        "versione": {"type": "integer", "minimum": 2},
+        "nodi_aggiunti": {"type": "array", "items": {"$ref": "grafo.schema.json#/$defs/nodo"}},
+        "nodi_tolti": {"type": "array", "items": {"$ref": "grafo.schema.json#/$defs/nodo"}},
+        "archi_aggiunti": {"type": "array", "items": {"$ref": "grafo.schema.json#/$defs/arco"}},
+        "archi_tolti": {"type": "array", "items": {"$ref": "grafo.schema.json#/$defs/arco"}}
+      }
     },
     "meta": {
       "type": "object",

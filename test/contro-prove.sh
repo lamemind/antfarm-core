@@ -76,6 +76,46 @@ jq -c 'if .classe == "spawn" then .delta.archi |= map(select(.da != "redattore")
 verifica "spawn senza l'arco genitore → figlio nel delta → ≠0" \
   bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/spawn-senza-arco.jsonl'"
 
+verifica "flusso sintetico del grafo cambiato → 0" "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/grafo-cambiato.jsonl"
+FLUSSO_CAMBIO="$ORCHESTRA/test/flussi/grafo-cambiato.jsonl"
+jq -c 'if .tipo == "grafo-cambiato" then del(.delta) else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-senza-delta.jsonl"
+verifica "grafo-cambiato senza delta → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-senza-delta.jsonl'"
+jq -c 'if .tipo == "grafo-cambiato" then .delta.versione = 3 else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-altra-versione.jsonl"
+verifica "delta con versione diversa da quella del grafo → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-altra-versione.jsonl'"
+jq -c 'if .tipo == "grafo-cambiato" then .ts = "2026-11-08T10:00:11.000+01:00" else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-altra-ora.jsonl"
+verifica "ts dell'evento diverso da in_vigore → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-altra-ora.jsonl'"
+jq -c 'if .tipo == "grafo-cambiato" then .delta.archi_tolti = [{"da": "A", "a": "B", "diritti": ["scrive"]}] else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-tolto-presente.jsonl"
+verifica "un arco tolto ancora presente nel grafo → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-tolto-presente.jsonl'"
+jq -c 'if .tipo == "partita-aperta" then .delta = {"versione": 2, "nodi_aggiunti": [], "nodi_tolti": [], "archi_aggiunti": [], "archi_tolti": []} else . end' "$FLUSSO_CAMBIO" > "$TMP/delta-fuori-posto.jsonl"
+verifica "delta su un evento che non è grafo-cambiato → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/delta-fuori-posto.jsonl'"
+
+echo "delta del grafo"
+DELTA=$(python3 - "$TMP" <<'PY'
+import json, sys
+sys.path.insert(0, f"{sys.argv[1]}/bin")
+import grafo as libgrafo
+
+arco = lambda da, a, *diritti: {"da": da, "a": a, "diritti": list(diritti)}
+nodo = lambda identita, ruolo="x": {"id": identita, "tipo": "llm", "ruolo": ruolo}
+prima = {"versione": 1, "nodi": [nodo("A"), nodo("B"), nodo("X")],
+         "archi": [arco("A", "B", "conosce", "scrive"), arco("B", "A", "scrive"), arco("A", "X", "scrive")]}
+dopo = {"versione": 2, "nodi": [nodo("A"), nodo("B", "nuovo ruolo"), nodo("C")],
+        "archi": [arco("A", "B", "scrive", "conosce"), arco("B", "A", "conosce", "scrive"), arco("B", "C", "scrive")]}
+print(json.dumps(libgrafo.delta(prima, dopo)))
+PY
+)
+verifica "delta: la versione è quella nuova" jq -e '.versione == 2' <<< "$DELTA"
+verifica "delta: nodo nuovo fra gli aggiunti, nodo sparito fra i tolti" \
+  jq -e '([.nodi_aggiunti[].id] | index("C")) and ([.nodi_tolti[].id] | index("X"))' <<< "$DELTA"
+verifica "delta: un nodo che cambia campo è tolto e aggiunto" \
+  jq -e '([.nodi_aggiunti[].id] | index("B")) and ([.nodi_tolti[].id] | index("B"))' <<< "$DELTA"
+verifica "delta: gli stessi diritti in altro ordine non sono un cambio" \
+  jq -e '[.archi_aggiunti[], .archi_tolti[] | select(.da == "A" and .a == "B")] | length == 0' <<< "$DELTA"
+verifica "delta: un arco che cambia diritti è tolto e aggiunto" \
+  jq -e '([.archi_aggiunti[] | select(.da == "B" and .a == "A")] | length == 1) and ([.archi_tolti[] | select(.da == "B" and .a == "A")] | length == 1)' <<< "$DELTA"
+verifica "delta: arco nuovo fra gli aggiunti, arco sparito fra i tolti" \
+  jq -e '([.archi_aggiunti[] | select(.a == "C")] | length == 1) and ([.archi_tolti[] | select(.a == "X")] | length == 1)' <<< "$DELTA"
+
 echo "vista"
 VISTA_B=$("$TMP/bin/vista.py" "$GRAFO_TELEFONO" B)
 verifica "vista di B: C è l'unico destinatario di scrive" grep -qx 'Puoi scrivere a: C' <<< "$VISTA_B"
