@@ -638,6 +638,35 @@ verifica "solo D riceve l'ingresso a partita aperta" jq -e '.prompt_ingresso' <<
 verifica "delta v1 → v2: entra D, sparisce C → A, nascono C → D, D → A, D → regia" \
   jq -e '.delta_nodi == ["D"] and .delta_tolti == [["C","A"]] and .delta_aggiunti == [["C","D"],["D","A"],["D","regia"]] and .nodi_tolti == []' <<< "$CADAVERE"
 
+echo "il cadavere squisito: rapporto su una partita a secco già giocata"
+RAPPORTI=$(python3 - "$ORCHESTRA" 2026-11-08-114717-cadavere-a-secco 2026-11-08-114856-cadavere-contro-prova-a-secco <<'PY'
+import json, sys
+from pathlib import Path
+orchestra = Path(sys.argv[1])
+sys.path.insert(0, str(orchestra / "bin"))
+sys.path.insert(1, str(orchestra))
+from giochi.cadavere import rapporto
+
+vuota = {"sessioni": [], "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, "token": 0}
+risultato = {}
+for chiave, partita in (("secco", sys.argv[2]), ("contro", sys.argv[3])):
+    testo = rapporto.componi(rapporto.misura(orchestra / "partite" / partita, orchestra / "registro" / "partite.tsv",
+                                             orchestra / "registro" / "messaggi.jsonl", vuota), vuota, "registro", "log")
+    sezione = testo.split("## Il testo ricomposto")[1].split("## Messaggi partiti")[0]
+    righe = [riga for riga in sezione.splitlines() if riga.startswith("| ") and not riga.startswith("| Posizione") and not riga.startswith("| ---")]
+    risultato[chiave] = {"testo": testo, "righe_del_testo": len(righe), "prima": righe[0], "ultima": righe[-1], "avvertenze": sum("⚠️" in riga for riga in righe)}
+print(json.dumps(risultato, ensure_ascii=False))
+PY
+)
+verifica "una riga per turno, dal turno 0 al 17: 18 righe" jq -e '.secco.righe_del_testo == 18 and .contro.righe_del_testo == 18' <<< "$RAPPORTI"
+verifica "ogni turno scritto coincide con la posizione nel log" jq -e '.secco.avvertenze == 0 and .contro.avvertenze == 0' <<< "$RAPPORTI"
+verifica "la prima riga è il turno 0 della regia, l'ultima il 17 di C alla regia" \
+  jq -e '(.secco.prima | contains("regia → A")) and (.secco.ultima | contains("C → regia"))' <<< "$RAPPORTI"
+verifica "il rapporto porta i quattro controlli, tutti superati" jq -e '(.secco.testo | contains("**fallito**") | not) and (.secco.testo | contains("| 4 | una riga per messaggio | superato"))' <<< "$RAPPORTI"
+verifica "senza riga nel registro lo dice" jq -e '.secco.testo | contains("Riga del registro assente")' <<< "$RAPPORTI"
+verifica "il rapporto dice quante volte C ha scritto ad A dopo il cambio: 0 a secco, 1 nella contro-prova" \
+  jq -e '(.secco.testo | contains("C ha scritto ad A dopo il cambio: 0 volte")) and (.contro.testo | contains("C ha scritto ad A dopo il cambio: 1 volta"))' <<< "$RAPPORTI"
+
 echo
 if [[ $fallite -gt 0 ]]; then
   echo "CONTRO-PROVE FALLITE: $fallite"

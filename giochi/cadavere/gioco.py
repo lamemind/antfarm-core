@@ -16,6 +16,7 @@ Tre leggono le righe del log dei messaggi; il terzo legge prompt-D.txt, perché 
 il nodo nuovo riceve dal meccanismo, non la scelta di D di guardarla.
 """
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -136,6 +137,20 @@ def oracolo(righe_log, in_vigore_v2, testo_prompt_d):
     ]
     superati = sum(controllo["superato"] for controllo in controlli)
     return {"controlli": controlli, "superati": superati, "esito": f"{superati}/{len(controlli)}", "messaggi_fra_nodi": len(turni)}
+
+
+def in_vigore_v2(cartella_partita):
+    """L'ora in cui la versione 2 è entrata in vigore; None se la partita non ci è arrivata."""
+    percorso = Path(cartella_partita) / "grafi" / "v2.json"
+    return json.loads(percorso.read_text(encoding="utf-8"))["in_vigore"] if percorso.is_file() else None
+
+
+def oracolo_della_partita(cartella_partita, righe_log):
+    """L'oracolo sui file di una partita: il log, grafi/v2.json, prompt-D.txt."""
+    file_prompt = Path(cartella_partita) / f"prompt-{NODO_NUOVO}.txt"
+    testo_prompt = file_prompt.read_text(encoding="utf-8") if file_prompt.is_file() else None
+    cambio = in_vigore_v2(cartella_partita)
+    return {**oracolo(righe_log, cambio, testo_prompt), "in_vigore_v2": cambio}
 
 
 def letti_dopo_il_cambio(righe_log, in_vigore_v2):

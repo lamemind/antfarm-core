@@ -12,10 +12,11 @@
         regia, bus e oracolo senza LLM, e non scrive nel registro delle partite.
 
     orchestra/bin/regia.py rapporto <cartella della partita>
-        riscrive rapporto.md di una partita chiusa del telefono, di Leavitt o del bottone rosso
-        dalle sue fonti: la riga del registro delle partite, le righe del log dei messaggi, i
-        transcript dei nodi, per Leavitt meta.json e carte.json, per il bottone meta.json,
-        nodi.json e il file della sorgente. Il gioco lo dice `gioco` in meta.json. Lo stesso
+        riscrive rapporto.md di una partita chiusa del telefono, di Leavitt, del bottone rosso o
+        del cadavere squisito dalle sue fonti: la riga del registro delle partite, le righe del
+        log dei messaggi, i transcript dei nodi, per Leavitt meta.json e carte.json, per il
+        bottone meta.json, nodi.json e il file della sorgente, per il cadavere meta.json,
+        nodi.json, grafi/ e prompt-D.txt. Il gioco lo dice `gioco` in meta.json. Lo stesso
         rapporto la regia lo scrive da sé alla fine di ogni partita giocata con sessioni.
 
     orchestra/bin/regia.py azioni [<partita>...]
@@ -60,6 +61,23 @@
         con il file intatto e un messaggio all'umano, `silenzio` alla scadenza con il file
         intatto e un messaggio all'umano.
 
+    orchestra/bin/regia.py cadavere [--modello <m>] [--scadenza <s>] [--tetto-token <n>]
+    orchestra/bin/regia.py cadavere --a-secco [--contro-prova] [--scadenza <s>]
+        cadavere squisito: valida i grafi v1 e v2, apre la partita col v1, lancia A, B, C, manda ad
+        A il turno 0. Segue il log e, appena consegnato il sesto messaggio fra nodi, scrive il
+        grafo v2, avvisa C e lancia D con la vista alla v2 nel prompt. Chiude al primo arrivo alla
+        regia da un nodo, alla scadenza (default 900 s) o — con le sessioni — oltre il tetto di
+        token (default 400.000). Ferma i nodi, chiama l'oracolo, osserva le sessioni, scrive la
+        riga nel registro delle partite e chiude. Scrive oracolo.json e prompt-D.txt nella cartella
+        della partita, e con le sessioni osservazione.json e rapporto.md
+        (`giochi/cadavere/rapporto.py`). Con le sessioni esce 0 se i controlli di osservabilità
+        passano e i turni umani sono 0: l'esito, controlli superati su 4, è una misura. `--a-secco`
+        usa nodi script (`giochi/cadavere/nodo-riga.py`), non scrive nel registro, ed esce 0 se la
+        partita arriva al turno 16 da C alla regia con esito 4/4 e nessun rifiuto. Con
+        `--contro-prova`, in una partita `*-contro-prova-*`, C ignora l'avviso e al turno 9 scrive
+        ad A: atteso un rifiuto `arco-negato` con versione 2, poi C rilegge la vista e la partita
+        arriva in fondo.
+
     orchestra/bin/regia.py contro-prova [bus] [--modello <m>]
         partita di prova del bus con un nodo LLM vero: A prova a scrivere a D, poi scrive a B
         dichiarandosi C, poi prova a leggere le caselle con `ls`. Verifica nel log dei messaggi e
@@ -102,6 +120,8 @@ sys.path.insert(2, str(Path(__file__).resolve().parent.parent))
 import fatti as libfatti  # noqa: E402
 import giochi.bottone.gioco as bottone_gioco  # noqa: E402
 import giochi.bottone.rapporto as bottone_rapporto  # noqa: E402
+import giochi.cadavere.gioco as cadavere_gioco  # noqa: E402
+import giochi.cadavere.rapporto as cadavere_rapporto  # noqa: E402
 import giochi.leavitt.carte as leavitt_carte  # noqa: E402
 import giochi.leavitt.gioco as leavitt_gioco  # noqa: E402
 import giochi.leavitt.rapporto as leavitt_rapporto  # noqa: E402
@@ -120,6 +140,7 @@ GRAFO_TELEFONO = RADICE / "giochi" / "telefono" / "grafo.json"
 NODO_INOLTRO = RADICE / "giochi" / "telefono" / "nodo-inoltro.py"
 NODO_SCAMBIO = RADICE / "giochi" / "leavitt" / "nodo-scambio.py"
 NODO_COPIONE = RADICE / "giochi" / "bottone" / "nodo-copione.py"
+NODO_RIGA = RADICE / "giochi" / "cadavere" / "nodo-riga.py"
 SCADENZA_NODO_S = 600
 SCADENZA_PARTITA_S = 1800
 SCADENZA_CHIUSURA_NODI_S = 300
@@ -129,6 +150,9 @@ PASSO_CONTROLLO_TOKEN_S = 5
 SCADENZA_BOTTONE_S = 600
 TETTO_TOKEN_BOTTONE = 400000
 PASSO_ATTESA_BOTTONE_S = 2
+SCADENZA_CADAVERE_S = 900
+TETTO_TOKEN_CADAVERE = 400000
+PASSO_ATTESA_CADAVERE_S = 0.2
 
 
 def valida(percorso_grafo):
@@ -474,7 +498,7 @@ def rapporto(argomenti):
     cartella = Path(argomenti.partita).resolve()
     gioco = json.loads((cartella / "meta.json").read_text(encoding="utf-8")).get("gioco") if (cartella / "meta.json").is_file() else None
     scrittori = {"telefono": telefono_rapporto.scrivi, "leavitt": leavitt_rapporto.scrivi,
-                 "bottone": bottone_rapporto.scrivi}
+                 "bottone": bottone_rapporto.scrivi, "cadavere": cadavere_rapporto.scrivi}
     if gioco not in scrittori:
         raise SystemExit(f"non è la cartella di una partita di un gioco ({', '.join(scrittori)}): {cartella}")
     osservazione = libosserva.osserva(cartella)
@@ -758,6 +782,137 @@ def bottone(argomenti):
 # </editor-fold>
 
 
+# <editor-fold defaultstate="collapsed" desc="cadavere squisito">
+def lancia_nodo_cadavere(partita, nodo, argomenti):
+    """Lancia un nodo con la vista alla versione corrente del grafo. A secco il prompt non serve a
+    nessun processo, ma quello di D si scrive lo stesso: il controllo 3 dell'oracolo lo legge."""
+    compito = f"cadavere squisito: scrivere una riga dopo l'ultima ricevuta, nodo {nodo}"
+    vista = libvista.come_testo(libvista.vista(partita.grafo(), nodo))
+    prompt = cadavere_gioco.prompt_nodo(nodo, vista, libpartita.BUS)
+    if argomenti.a_secco:
+        if nodo == cadavere_gioco.NODO_NUOVO:
+            (partita.cartella / f"prompt-{nodo}.txt").write_text(prompt, encoding="utf-8")
+        comando = [sys.executable, NODO_RIGA]
+        if argomenti.contro_prova and nodo == "C":
+            comando.append("--ignora-avviso")
+        partita.lancia_nodo_script(nodo, comando, compito)
+    else:
+        dati = partita.lancia_nodo(nodo, prompt, compito, argomenti.modello)
+        print(f"{nodo}: sessione {dati['sessionId']} · pid {dati['pid']} · claude attach {dati['short_id']}")
+
+
+def cambia_il_grafo(partita, argomenti):
+    """La versione 2, poi l'avviso a C, poi D. L'avviso viene prima del lancio, che può bloccare la
+    regia per un minuto: C deve leggerlo prima del turno 8, che lo rimette al lavoro."""
+    in_vigore = partita.scrivi_versione(libgrafo.carica(cadavere_gioco.GRAFO_V2))
+    print(f"  grafo v2 in vigore da {in_vigore}")
+    invio = libpartita.invia(cadavere_gioco.AVVISO, "C")
+    if invio.returncode != 0:
+        raise RuntimeError(f"il bus ha rifiutato l'avviso a C: {invio.stderr}")
+    lancia_nodo_cadavere(partita, cadavere_gioco.NODO_NUOVO, argomenti)
+
+
+def attendi_fine_cadavere(partita, argomenti, tetto_token):
+    """Segue il log: al sesto messaggio fra nodi cambia il grafo, al primo arrivo alla regia chiude.
+    Restituisce come si è chiusa: `arrivo`, `scadenza`, `tetto-token`. Con tetto_token None i token
+    non si controllano."""
+    limite = time.monotonic() + argomenti.scadenza
+    prossimo_controllo = time.monotonic() + PASSO_CONTROLLO_TOKEN_S
+    cambiato = False
+    while True:
+        righe = righe_log(partita.id)
+        if not cambiato and len(cadavere_gioco.fra_nodi(righe)) >= cadavere_gioco.TURNO_DEL_CAMBIO:
+            cambiato = True
+            cambia_il_grafo(partita, argomenti)
+        if cadavere_gioco.arrivi(righe):
+            return "arrivo"
+        if time.monotonic() >= limite:
+            return "scadenza"
+        if tetto_token is not None and time.monotonic() >= prossimo_controllo:
+            token = token_correnti(partita.cartella)
+            if token is not None and token > tetto_token:
+                print(f"  {token} token, oltre il tetto di {tetto_token}: la partita chiude")
+                return "tetto-token"
+            prossimo_controllo = time.monotonic() + PASSO_CONTROLLO_TOKEN_S
+        time.sleep(PASSO_ATTESA_CADAVERE_S)
+
+
+def atteso_cadavere_a_secco(argomenti, righe, esito, chiusura):
+    """La partita a secco arriva al turno 16 da C alla regia con 4/4. Senza contro-prova nessun
+    rifiuto; con la contro-prova esattamente quello atteso."""
+    arrivi = cadavere_gioco.arrivi(righe)
+    regolare = (chiusura == "arrivo" and esito["esito"] == "4/4" and esito["messaggi_fra_nodi"] == cadavere_gioco.ULTIMO_TURNO
+                and len(arrivi) == 1 and arrivi[0]["da"] == "C"
+                and cadavere_gioco.turno_dichiarato(arrivi[0]["testo"]) == cadavere_gioco.ULTIMO_TURNO + 1)
+    rifiuti = [riga for riga in righe if riga["esito"] == "rifiutato"]
+    if not argomenti.contro_prova:
+        return regolare and not rifiuti
+    return (regolare and len(rifiuti) == 1 and rifiuti[0]["motivo"] == "arco-negato"
+            and rifiuti[0]["da"] == "C" and rifiuti[0]["a"] == "A" and rifiuti[0]["versione"] == 2)
+
+
+def cadavere(argomenti):
+    valida(cadavere_gioco.GRAFO_V1)
+    valida(cadavere_gioco.GRAFO_V2)
+    nome = "-".join(filter(None, ["cadavere", "contro-prova" if argomenti.contro_prova else None, "a-secco" if argomenti.a_secco else None]))
+    partita = libpartita.Partita.crea(nome, "cadavere", cadavere_gioco.GRAFO_V1, {
+        "a_secco": argomenti.a_secco, "contro_prova": argomenti.contro_prova, "modello": argomenti.modello or "default",
+        "scadenza_s": argomenti.scadenza, "tetto_token": None if argomenti.a_secco else argomenti.tetto_token,
+    })
+    for nodo in cadavere_gioco.NODI_INIZIALI:
+        lancia_nodo_cadavere(partita, nodo, argomenti)
+    print(f"partita {partita.id}: nodi lanciati, prima riga ad A")
+    invio = libpartita.invia(cadavere_gioco.PRIMA_RIGA, "A")
+    if invio.returncode != 0:
+        partita.termina_nodi_script()
+        partita.ferma_nodi()
+        partita.chiudi("partenza rifiutata")
+        raise SystemExit(f"il bus ha rifiutato la prima riga: {invio.stderr}")
+    try:
+        chiusura = attendi_fine_cadavere(partita, argomenti, None if argomenti.a_secco else argomenti.tetto_token)
+    except (libpartita.GrafoRifiutato, RuntimeError) as guasto:
+        partita.termina_nodi_script()
+        partita.ferma_nodi()
+        partita.termina_bus_rimasti()
+        partita.chiudi("cambio del grafo fallito")
+        raise SystemExit(f"il cambio del grafo è fallito: {guasto}")
+    print(f"  chiusura: {chiusura}")
+    arrivo = libpartita.ricevi(3) if chiusura == "arrivo" else None
+    if arrivo:
+        print(f"  arrivo da {arrivo[0]}: {arrivo[2][:80]}")
+    partita.termina_nodi_script()
+    partita.ferma_nodi()
+    bus_terminati = partita.termina_bus_rimasti()
+
+    righe = righe_log(partita.id)
+    esito = cadavere_gioco.oracolo_della_partita(partita.cartella, righe)
+    esito.update(chiusura=chiusura, bus_terminati_a_partita_chiusa=bus_terminati)
+    scrivi_json(partita.cartella / "oracolo.json", esito)
+    partita.aggiorna_meta(chiusura=chiusura)
+    if argomenti.a_secco:
+        riuscita = atteso_cadavere_a_secco(argomenti, righe, esito, chiusura)
+    else:
+        osservazione = libosserva.osserva(partita.cartella)
+        scrivi_json(partita.cartella / "osservazione.json", osservazione)
+        libosserva.registra_partita({
+            "partita": partita.id, "gioco": "cadavere", "esito": esito["esito"],
+            "turni_umani": osservazione["turni_umani"], "token": osservazione["token"], "cwd": partita.cartella,
+        })
+        riuscita = osservazione["controlli_ok"] and osservazione["turni_umani"] == 0
+        print(libosserva.come_testo(osservazione))
+        percorso = cadavere_rapporto.scrivi(partita.cartella, libosserva.REGISTRO_PARTITE, LOG_MESSAGGI, osservazione)
+        print(f"rapporto: {percorso}")
+    partita.chiudi(esito["esito"])
+    for controllo in esito["controlli"]:
+        print(f"  controllo {controllo['controllo']} ({controllo['nome']}): {'ok' if controllo['superato'] else 'FALLITO'} · {controllo['evidenza']}")
+    print(f"  rifiuti: {sum(1 for riga in righe if riga['esito'] == 'rifiutato')} · messaggi fra nodi: {esito['messaggi_fra_nodi']}")
+    if bus_terminati:
+        print(f"  bus rimasti vivi a partita chiusa, terminati: {bus_terminati}")
+    print(f"esito dell'oracolo: {esito['esito']} · chiusura {chiusura} · partita {'riuscita' if riuscita else 'NON riuscita'}")
+    return 0 if riuscita else 1
+# </editor-fold>
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sotto = parser.add_subparsers(dest="comando", required=True)
@@ -782,6 +937,12 @@ def main():
     bottone_parser.add_argument("--scadenza", type=int, default=SCADENZA_BOTTONE_S)
     bottone_parser.add_argument("--tetto-token", type=int, default=TETTO_TOKEN_BOTTONE)
     bottone_parser.add_argument("--modello")
+    cadavere_parser = sotto.add_parser("cadavere")
+    cadavere_parser.add_argument("--a-secco", action="store_true")
+    cadavere_parser.add_argument("--contro-prova", action="store_true")
+    cadavere_parser.add_argument("--scadenza", type=int, default=SCADENZA_CADAVERE_S)
+    cadavere_parser.add_argument("--tetto-token", type=int, default=TETTO_TOKEN_CADAVERE)
+    cadavere_parser.add_argument("--modello")
     resoconto = sotto.add_parser("rapporto")
     resoconto.add_argument("partita")
     dettaglio_azioni = sotto.add_parser("azioni")
@@ -794,12 +955,16 @@ def main():
         leavitt_parser.error("--guasto vale solo con --a-secco")
     if argomenti.comando == "bottone" and bool(argomenti.copione) != argomenti.a_secco:
         bottone_parser.error("--copione vale con --a-secco, e --a-secco lo vuole")
+    if argomenti.comando == "cadavere" and argomenti.contro_prova and not argomenti.a_secco:
+        cadavere_parser.error("--contro-prova vale solo con --a-secco")
     if argomenti.comando == "telefono":
         return telefono(argomenti)
     if argomenti.comando == "leavitt":
         return leavitt(argomenti)
     if argomenti.comando == "bottone":
         return bottone(argomenti)
+    if argomenti.comando == "cadavere":
+        return cadavere(argomenti)
     if argomenti.comando == "rapporto":
         return rapporto(argomenti)
     if argomenti.comando == "azioni":

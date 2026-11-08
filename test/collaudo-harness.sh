@@ -9,13 +9,17 @@
 #   evento valido per valida-eventi.py
 # azioni fuori bus — nel replay della partita che ne ha, il nodo-chiuso di ogni nodo porta l'elenco
 #   scritto dalla regia in nodi.json, e l'harness non nomina i transcript
+# grafo che cambia — nel replay del cadavere a secco partita-aperta porta la versione 1, un solo
+#   grafo-cambiato porta il delta e la riga di grafi/v2.json intatta, e arriva prima del lancio di D e
+#   del primo messaggio con la versione 2
 # sola lettura — sha256 del registro delle partite ($P) e di $M uguale prima e dopo i replay
 # porta locale — con l'harness acceso, ss -ltn mostra la porta legata solo a 127.0.0.1, e una
 #   connessione con un'origine estranea è rifiutata
 # dal vivo a secco — su una copia del motore in una cartella temporanea, come contro-prove.sh:
 #   harness acceso, client in ascolto, regia --a-secco; il client riceve ogni riga che la partita
 #   aggiunge al $M della copia, un nodo-chiuso per ogni nodo dopo il suo ultimo invio, e stampa il
-#   ritardo fra il ts della riga e l'arrivo (mediana, massimo)
+#   ritardo fra il ts della riga e l'arrivo (mediana, massimo); poi una partita a secco del cadavere,
+#   con grafo-cambiato prima del primo messaggio con la versione 2
 #
 # Esce 1 se una verifica fallisce.
 set -uo pipefail
@@ -30,6 +34,7 @@ PARTITE_T42=(
   2026-10-26-121519-telefono-riformula
 )
 PARTITA_AZIONI=2026-10-27-115351-telefono-riformula
+PARTITA_CADAVERE=2026-11-08-114717-cadavere-a-secco
 TMP=$(mktemp -d)
 HARNESS_PID=""
 trap '[[ -n $HARNESS_PID ]] && kill "$HARNESS_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
@@ -126,6 +131,29 @@ verifica "l'elenco dell'evento è quello di nodi.json, intatto" \
   "$(jq -c '[.nodi | to_entries[] | select(.value.chiuso) | {(.key): .value.azioni}] | add' "$ORCHESTRA/partite/$PARTITA_AZIONI/nodi.json")"
 verifica "l'harness non nomina i transcript" uguali "$(grep -c '.claude/projects' "$ORCHESTRA/bin/harness.py")" 0
 
+grafo_cambiato_in_ordine() { # <file degli eventi>: grafo-cambiato prima del lancio di D e del primo messaggio con v2
+  jq -se 'to_entries as $e
+    | ([$e[] | select(.value.tipo == "grafo-cambiato") | .key]) as $cambi
+    | ($cambi | length) == 1
+      and ([$e[] | select(.value.tipo == "nodo-lanciato" and .value.nodo == "D") | .key] | all(. > $cambi[0]))
+      and ([$e[] | select(.value.classe == "messaggio" and .value.riga.versione == 2) | .key] | length > 0 and all(. > $cambi[0]))' "$1"
+}
+
+echo "replay $PARTITA_CADAVERE: il grafo che cambia"
+accendi "$TMP/harness-cadavere.out" "$ORCHESTRA/bin/harness.py" replay "$PARTITA_CADAVERE" --velocita 0
+EVENTI_CADAVERE="$TMP/eventi-cadavere.jsonl"
+"$ORCHESTRA/bin/ascolta.py" --porta "$PORTA" --eventi "$EVENTI_CADAVERE" --scadenza 60 > /dev/null
+spegni
+verifica "valida-eventi.py esce 0 su ogni evento ricevuto" "$ORCHESTRA/bin/valida-eventi.py" "$EVENTI_CADAVERE"
+verifica "partita-aperta porta il grafo alla versione 1, non l'ultima" \
+  jq -se '[.[] | select(.tipo == "partita-aperta")] | length == 1 and .[0].riga.grafo.versione == 1 and (.[0].riga.grafo.nodi | length) == 4' "$EVENTI_CADAVERE"
+verifica "il delta: entra D, sparisce C → A, nascono C → D, D → A, D → regia, versione 2" \
+  jq -se '[.[] | select(.tipo == "grafo-cambiato")][0].delta | .versione == 2 and ([.nodi_aggiunti[].id] == ["D"]) and (.nodi_tolti == [])
+    and ([.archi_tolti[] | [.da, .a]] == [["C","A"]]) and ([.archi_aggiunti[] | [.da, .a]] | sort == [["C","D"],["D","A"],["D","regia"]])' "$EVENTI_CADAVERE"
+verifica "la riga è grafi/v2.json intatto, e il ts è l'ora di entrata in vigore" \
+  bash -c "test \"\$(jq -cS 'select(.tipo == \"grafo-cambiato\") | .riga' '$EVENTI_CADAVERE')\" = \"\$(jq -cS . '$ORCHESTRA/partite/$PARTITA_CADAVERE/grafi/v2.json')\" && jq -se '[.[] | select(.tipo == \"grafo-cambiato\")][0] | .ts == .riga.in_vigore' '$EVENTI_CADAVERE'"
+verifica "grafo-cambiato prima del lancio di D e del primo messaggio con v2" grafo_cambiato_in_ordine "$EVENTI_CADAVERE"
+
 echo "sola lettura: impronte dopo i replay"
 IMPRONTA_DOPO=$(sha256sum "$P" "$M")
 verifica "sha256 di \$P e \$M uguale prima e dopo" uguali "$IMPRONTA_PRIMA" "$IMPRONTA_DOPO"
@@ -161,6 +189,21 @@ verifica "ogni nodo-chiuso arriva dopo l'ultimo messaggio inviato da quel nodo" 
   jq -se 'to_entries as $e | [$e[] | select(.value.tipo == "nodo-chiuso")] | all(. as $c |
     ([$e[] | select(.value.classe == "messaggio" and .value.riga.da == $c.value.nodo) | .key] | max // -1) < $c.key)' "$TMP/vivo.jsonl"
 printf '  ritardo ts → client: %s\n' "$(jq -c '.ritardo_ms' "$TMP/vivo-riepilogo.json")"
+
+echo "dal vivo, cadavere a secco sulla stessa copia del motore"
+accendi "$TMP/harness-cadavere-vivo.out" "$COPIA/bin/harness.py" vivo
+"$COPIA/bin/ascolta.py" --porta "$PORTA" --fino-a-chiusura --eventi "$TMP/cadavere-vivo.jsonl" --scadenza 180 \
+  > "$TMP/cadavere-vivo-riepilogo.json" &
+ASCOLTO_PID=$!
+"$COPIA/bin/regia.py" cadavere --a-secco > "$TMP/regia-cadavere.out" 2>&1
+verifica "la regia a secco del cadavere chiude la partita riuscita" test $? -eq 0
+wait "$ASCOLTO_PID"
+verifica "il client si ferma su partita-chiusa" test $? -eq 0
+spegni
+verifica "valida-eventi.py esce 0 sugli eventi dal vivo" "$COPIA/bin/valida-eventi.py" "$TMP/cadavere-vivo.jsonl"
+verifica "dal vivo partita-aperta porta la versione 1" \
+  jq -se '[.[] | select(.tipo == "partita-aperta")] | length == 1 and .[0].riga.grafo.versione == 1' "$TMP/cadavere-vivo.jsonl"
+verifica "dal vivo grafo-cambiato prima del lancio di D e del primo messaggio con v2" grafo_cambiato_in_ordine "$TMP/cadavere-vivo.jsonl"
 
 echo
 if [[ $fallite -gt 0 ]]; then

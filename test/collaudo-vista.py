@@ -23,6 +23,8 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
   ci sono i nodi del grafo nuovo, l'arco tolto non c'è più, gli archi nuovi sì, la testata porta la
   versione nuova; i pallini già corsi sull'arco tolto restano fermi sul loro destinatario, e quelli
   dopo il cambio corrono sugli archi nuovi
+- cadavere squisito a secco (replay): il grafo che cambia a partita aperta. Nel DOM ci sono i 5 nodi
+  della versione 2, nessun arco C → A, un arco C → D e uno D → A, ogni pallino fermo sul suo destinatario
 - bottone a secco (copione boom): il nodo umano e la sorgente compaiono coi loro tipi; una riga
   `scritto` del log è un pallino [data-esito=scritto] che corre sull'arco A → bottone e si ferma
   sulla sorgente, e il clic porta il testo della riga
@@ -50,6 +52,7 @@ LOG_MESSAGGI = ORCHESTRA / "registro" / "messaggi.jsonl"
 PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
 PARTITA_SORGENTE = "2026-11-08-001923-bottone-a-secco-boom"
+PARTITA_CADAVERE = "2026-11-08-114717-cadavere-a-secco"
 FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
 FLUSSO_GRAFO_CAMBIATO = ORCHESTRA / "test" / "flussi" / "grafo-cambiato.jsonl"
 PARTITA_AZIONI = "2026-10-27-115351-telefono-riformula"
@@ -268,6 +271,27 @@ def scenario_grafo_cambiato(pagina, schermate, _log):
             pagina.screenshot(path=str(schermate / "vista-grafo-cambiato.png"))
 
 
+def scenario_cadavere(pagina, schermate, log):
+    print(f"cadavere squisito a secco {PARTITA_CADAVERE}")
+    cartella = ORCHESTRA / "partite" / PARTITA_CADAVERE
+    v1 = json.loads((cartella / "grafi" / "v1.json").read_text(encoding="utf-8"))["grafo"]
+    v2 = json.loads((cartella / "grafi" / "v2.json").read_text(encoding="utf-8"))["grafo"]
+    coppie = lambda grafo: {(arco["da"], arco["a"]) for arco in grafo["archi"]}
+    delta = {"archi_tolti": [arco for arco in v1["archi"] if (arco["da"], arco["a"]) not in coppie(v2)],
+             "archi_aggiunti": [arco for arco in v2["archi"] if (arco["da"], arco["a"]) not in coppie(v1)]}
+    consegnati = [riga for riga in log.values() if riga.get("partita") == PARTITA_CADAVERE and riga["esito"] == "consegnato"]
+    with Harness("replay", PARTITA_CADAVERE, "--velocita", VELOCITA_REPLAY) as harness:
+        apri_e_attendi(pagina, harness.indirizzo)
+        dom = misura_dom(pagina)
+        verifica("[data-nodo] = 5", len(dom["nodi"]) == 5, f"{sorted(dom['nodi'])}")
+        verifica("nessun [data-arco] per C → A", "C→A" not in dom["archi"])
+        verifica("un [data-arco] per C → D", "C→D" in dom["archi"])
+        verifica("un [data-arco] per D → A", "D→A" in dom["archi"])
+        verifica_grafo_cambiato(dom, v2, delta, consegnati)
+        if schermate:
+            pagina.screenshot(path=str(schermate / "vista-cadavere-a-secco.png"))
+
+
 def scenario_sorgente(pagina, schermate, log):
     print(f"bottone a secco {PARTITA_SORGENTE}")
     grafo = json.loads((ORCHESTRA / "partite" / PARTITA_SORGENTE / "grafo.json").read_text(encoding="utf-8"))
@@ -361,7 +385,7 @@ def main():
     log = righe_del_log()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_grafo_cambiato, scenario_sorgente, scenario_azioni):
+        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_grafo_cambiato, scenario_cadavere, scenario_sorgente, scenario_azioni):
             pagina = browser.new_page(viewport={"width": 1400, "height": 900})
             errori_pagina = []
             pagina.on("pageerror", lambda errore: errori_pagina.append(str(errore)))
