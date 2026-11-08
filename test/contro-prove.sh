@@ -564,6 +564,80 @@ verifica "due numeri persi fra B e C → 8/10" jq -e '.esito == "8/10"' <<< "$OR
 verifica "i persi sono attribuiti al salto B → C, cifra riformattata compresa" jq -e '.persi_bc == .attesi' <<< "$ORACOLO"
 verifica "catena senza C → D: esito interrotta" jq -e '.interrotto == "interrotta C→D"' <<< "$ORACOLO"
 
+echo "il cadavere squisito: grafi, prompt, oracolo"
+V1="$ORCHESTRA/giochi/cadavere/grafo-v1.json"
+V2="$ORCHESTRA/giochi/cadavere/grafo-v2.json"
+verifica "grafo v1 del cadavere valido → 0" "$TMP/bin/valida-grafo.py" "$V1"
+verifica "grafo v2 del cadavere valido → 0" "$TMP/bin/valida-grafo.py" "$V2"
+VISTA_D=$("$TMP/bin/vista.py" "$V2" D)
+verifica "vista di D: porta la versione 2" grep -q 'grafo versione 2$' <<< "$VISTA_D"
+verifica "vista di D: l'arco D → A" grep -q '^- D → A: ' <<< "$VISTA_D"
+verifica "vista di C dopo il cambio: scrive a D e non più ad A" grep -qx 'Puoi scrivere a: D, regia' <<< "$("$TMP/bin/vista.py" "$V2" C)"
+CADAVERE=$(python3 - "$TMP" "$ORCHESTRA" "$V1" "$V2" <<'PY'
+import json, sys
+radice, orchestra, v1, v2 = sys.argv[1:5]
+sys.path.insert(0, f"{radice}/bin")
+sys.path.insert(1, orchestra)
+import grafo as libgrafo
+import vista as libvista
+from giochi.cadavere import gioco
+
+in_vigore = "2026-11-08T10:00:10.000+01:00"
+vista_d = libvista.come_testo(libvista.vista(libgrafo.carica(v2), "D"))
+prompt_d = gioco.prompt_nodo("D", vista_d, "/bus")
+
+
+def riga(da, a, ts, versione, testo="turno 1: una riga", esito="consegnato", identita="m-1"):
+    return {"ts": ts, "id": identita, "esito": esito, "da": da, "a": a, "versione": versione, "testo": testo}
+
+
+prima = "2026-11-08T10:00:09.000+01:00"
+dopo = "2026-11-08T10:00:11.000+01:00"
+buone = [riga("A", "B", prima, 1), riga("C", "A", prima, 1), riga("C", "D", dopo, 2), riga("D", "A", dopo, 2),
+         riga("regia", "C", dopo, 2, "avviso\nsu due righe")]
+esito = lambda righe, cambio=in_vigore, prompt=prompt_d: gioco.oracolo(righe, cambio, prompt)
+superato = lambda righe, numero, **opzioni: esito(righe, **opzioni)["controlli"][numero - 1]["superato"]
+letti = gioco.letti_dopo_il_cambio([riga("C", "A", prima, 1, identita="m-a"), riga("C", "A", prima, 1, esito="letto", identita="m-a") | {"ts": dopo},
+                                    riga("A", "B", prima, 1, identita="m-b"), riga("A", "B", prima, 1, esito="letto", identita="m-b")], in_vigore)
+delta = libgrafo.delta(libgrafo.carica(v1), libgrafo.carica(v2))
+print(json.dumps({
+    "buone": esito(buone)["esito"],
+    "v2_prima_del_cambio": superato([riga("A", "B", prima, 2)], 1),
+    "v1_dopo_il_cambio": superato([riga("A", "B", dopo, 1)], 1),
+    "stesso_millesimo": superato([riga("A", "B", in_vigore, 1), riga("B", "C", in_vigore, 2)], 1),
+    "senza_v2": esito([riga("A", "B", prima, 1)], cambio=None, prompt=None)["esito"],
+    "c_a_con_v2": superato([riga("C", "A", dopo, 2)], 2),
+    "c_a_rifiutato_non_conta": superato([riga("C", "A", dopo, 2, esito="rifiutato")], 2),
+    "prompt_assente": superato([], 3, prompt=None),
+    "prompt_v1": superato([], 3, prompt=prompt_d.replace("grafo versione 2", "grafo versione 1")),
+    "prompt_senza_arco": superato([], 3, prompt=prompt_d.replace("- D → A: ", "- D → B: ")),
+    "due_righe": superato([riga("A", "B", prima, 1, "turno 1: uno\nturno 2: due")], 4),
+    "letti_dopo": [voce["id"] for voce in letti],
+    "turno": [gioco.turno_dichiarato("turno 7: x"), gioco.turno_dichiarato("  Turno 12 : y"), gioco.turno_dichiarato("riga senza numero")],
+    "prompt_riga_sola": "una riga sola" in prompt_d and "Non riportare mai le righe precedenti" in prompt_d and "`turno 17: <la tua riga>`" in prompt_d,
+    "prompt_ingresso": "Entri a partita già cominciata" in prompt_d and "Entri a partita già cominciata" not in gioco.prompt_nodo("A", "v", "/bus"),
+    "delta_nodi": [nodo["id"] for nodo in delta["nodi_aggiunti"]], "delta_tolti": [(a["da"], a["a"]) for a in delta["archi_tolti"]],
+    "delta_aggiunti": sorted((a["da"], a["a"]) for a in delta["archi_aggiunti"]), "nodi_tolti": delta["nodi_tolti"],
+}, ensure_ascii=False))
+PY
+)
+verifica "quattro controlli superati → 4/4; le righe della regia non contano" jq -e '.buone == "4/4"' <<< "$CADAVERE"
+verifica "controllo 1: una v2 partita prima del cambio cade" jq -e '.v2_prima_del_cambio == false' <<< "$CADAVERE"
+verifica "controllo 1: una v1 partita dopo il cambio cade" jq -e '.v1_dopo_il_cambio == false' <<< "$CADAVERE"
+verifica "controllo 1: nello stesso millesimo del cambio valgono entrambe" jq -e '.stesso_millesimo == true' <<< "$CADAVERE"
+verifica "senza v2 e senza prompt di D: cade solo il controllo 3 → 3/4" jq -e '.senza_v2 == "3/4"' <<< "$CADAVERE"
+verifica "controllo 2: una consegna C → A con v2 cade" jq -e '.c_a_con_v2 == false' <<< "$CADAVERE"
+verifica "controllo 2: un rifiuto C → A con v2 non conta" jq -e '.c_a_rifiutato_non_conta == true' <<< "$CADAVERE"
+verifica "controllo 3: prompt assente, alla v1 o senza arco D → A cade" \
+  jq -e '.prompt_assente == false and .prompt_v1 == false and .prompt_senza_arco == false' <<< "$CADAVERE"
+verifica "controllo 4: un messaggio con due righe cade" jq -e '.due_righe == false' <<< "$CADAVERE"
+verifica "letti dopo il cambio: solo il messaggio v1 letto dopo in_vigore" jq -e '.letti_dopo == ["m-a"]' <<< "$CADAVERE"
+verifica "il numero del turno si legge dal testo, None se manca" jq -e '.turno == [7, 12, null]' <<< "$CADAVERE"
+verifica "il prompt porta la regola della riga sola e il turno finale" jq -e '.prompt_riga_sola' <<< "$CADAVERE"
+verifica "solo D riceve l'ingresso a partita aperta" jq -e '.prompt_ingresso' <<< "$CADAVERE"
+verifica "delta v1 → v2: entra D, sparisce C → A, nascono C → D, D → A, D → regia" \
+  jq -e '.delta_nodi == ["D"] and .delta_tolti == [["C","A"]] and .delta_aggiunti == [["C","D"],["D","A"],["D","regia"]] and .nodi_tolti == []' <<< "$CADAVERE"
+
 echo
 if [[ $fallite -gt 0 ]]; then
   echo "CONTRO-PROVE FALLITE: $fallite"
