@@ -7,6 +7,8 @@
 #   fonti: un evento messaggio per ogni riga della partita nel log dei messaggi ($M), cogli stessi
 #   indici e in ordine di ts; un evento di lancio per ogni nodo che nodi.json dà per lanciato; ogni
 #   evento valido per valida-eventi.py
+# azioni fuori bus — nel replay della partita che ne ha, il nodo-chiuso di ogni nodo porta l'elenco
+#   scritto dalla regia in nodi.json, e l'harness non nomina i transcript
 # sola lettura — sha256 del registro delle partite ($P) e di $M uguale prima e dopo i replay
 # porta locale — con l'harness acceso, ss -ltn mostra la porta legata solo a 127.0.0.1, e una
 #   connessione con un'origine estranea è rifiutata
@@ -27,6 +29,7 @@ PARTITE_T42=(
   2026-10-26-121427-telefono-copia
   2026-10-26-121519-telefono-riformula
 )
+PARTITA_AZIONI=2026-10-27-115351-telefono-riformula
 TMP=$(mktemp -d)
 HARNESS_PID=""
 trap '[[ -n $HARNESS_PID ]] && kill "$HARNESS_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
@@ -104,6 +107,25 @@ cat "$TMP"/2026-*.jsonl > "$TMP/tutte.jsonl"
 verifica "valida-eventi.py esce 0 sul flusso intero, nessun messaggio emesso due volte" \
   "$ORCHESTRA/bin/valida-eventi.py" "$TMP/tutte.jsonl"
 
+echo "replay $PARTITA_AZIONI: il dettaglio delle azioni fuori bus"
+accendi "$TMP/harness-azioni.out" "$ORCHESTRA/bin/harness.py" replay "$PARTITA_AZIONI" --velocita 0
+EVENTI_AZIONI="$TMP/eventi-azioni.jsonl"
+"$ORCHESTRA/bin/ascolta.py" --porta "$PORTA" --eventi "$EVENTI_AZIONI" --scadenza 60 > /dev/null
+spegni
+verifica "valida-eventi.py esce 0 su ogni evento ricevuto" "$ORCHESTRA/bin/valida-eventi.py" "$EVENTI_AZIONI"
+chiuso() { # <nodo> <filtro jq sull'elenco delle azioni>: il nodo-chiuso del nodo è uno solo e passa il filtro
+  jq -se --arg nodo "$1" "[.[] | select(.tipo == \"nodo-chiuso\" and .nodo == \$nodo)] | length == 1 and (.[0].riga.azioni | $2)" "$EVENTI_AZIONI"
+}
+verifica "nodo-chiuso di A: 1 azione, errore sì" chiuso A 'length == 1 and .[0].errore == true and .[0].tool == "Bash"'
+verifica "nodo-chiuso di B: 1 azione, errore no" chiuso B 'length == 1 and .[0].errore == false and .[0].esito == "61"'
+verifica "nodo-chiuso di C e di D: nessuna azione" bash -c "$(declare -f chiuso); EVENTI_AZIONI='$EVENTI_AZIONI'; chiuso C 'type == \"array\" and length == 0' && chiuso D 'type == \"array\" and length == 0'"
+verifica "ogni nodo-chiuso porta tante azioni quante ne conta azioni_fuori_bus" \
+  jq -se '[.[] | select(.tipo == "nodo-chiuso")] | length == 4 and all(.riga as $voce | ($voce.azioni | type) == "array" and ($voce.azioni | length) == $voce.azioni_fuori_bus)' "$EVENTI_AZIONI"
+verifica "l'elenco dell'evento è quello di nodi.json, intatto" \
+  uguali "$(jq -sc '[.[] | select(.tipo == "nodo-chiuso") | {(.nodo): .riga.azioni}] | add' "$EVENTI_AZIONI")" \
+  "$(jq -c '[.nodi | to_entries[] | select(.value.chiuso) | {(.key): .value.azioni}] | add' "$ORCHESTRA/partite/$PARTITA_AZIONI/nodi.json")"
+verifica "l'harness non nomina i transcript" uguali "$(grep -c '.claude/projects' "$ORCHESTRA/bin/harness.py")" 0
+
 echo "sola lettura: impronte dopo i replay"
 IMPRONTA_DOPO=$(sha256sum "$P" "$M")
 verifica "sha256 di \$P e \$M uguale prima e dopo" uguali "$IMPRONTA_PRIMA" "$IMPRONTA_DOPO"
@@ -133,8 +155,8 @@ verifica "valida-eventi.py esce 0 sugli eventi dal vivo" "$COPIA/bin/valida-even
 verifica "lanciati A, B, C, D" jq -e '[.nodi_lanciati[][1]] | sort == ["A","B","C","D"]' "$TMP/vivo-riepilogo.json"
 verifica "un nodo-chiuso per ogni nodo lanciato, scritto dalla regia in nodi.json" \
   jq -e '[.nodi_chiusi[][1]] | sort == ["A","B","C","D"]' "$TMP/vivo-riepilogo.json"
-verifica "nodo script: azioni_fuori_bus null nella voce del nodo-chiuso" \
-  jq -se '[.[] | select(.tipo == "nodo-chiuso")] | length == 4 and all(.riga.azioni_fuori_bus == null and .riga.tipo == "script")' "$TMP/vivo.jsonl"
+verifica "nodo script: azioni_fuori_bus e azioni null nella voce del nodo-chiuso" \
+  jq -se '[.[] | select(.tipo == "nodo-chiuso")] | length == 4 and all(.riga.azioni_fuori_bus == null and .riga.azioni == null and .riga.tipo == "script")' "$TMP/vivo.jsonl"
 verifica "ogni nodo-chiuso arriva dopo l'ultimo messaggio inviato da quel nodo" \
   jq -se 'to_entries as $e | [$e[] | select(.value.tipo == "nodo-chiuso")] | all(. as $c |
     ([$e[] | select(.value.classe == "messaggio" and .value.riga.da == $c.value.nodo) | .key] | max // -1) < $c.key)' "$TMP/vivo.jsonl"
