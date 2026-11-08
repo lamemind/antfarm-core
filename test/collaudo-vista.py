@@ -22,6 +22,9 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
 - bottone a secco (copione boom): il nodo umano e la sorgente compaiono coi loro tipi; una riga
   `scritto` del log è un pallino [data-esito=scritto] che corre sull'arco A → bottone e si ferma
   sulla sorgente, e il clic porta il testo della riga
+- azioni fuori bus (telefono-riformula del 27 ottobre): il clic su un nodo porta nel nodo-chiuso
+  l'elenco delle azioni; il comando di B è uguale carattere per carattere a quello del suo
+  transcript, letto qui senza passare dal codice del motore
 
 Playwright è fissato alla versione il cui Chromium è già in ~/.cache/ms-playwright. Con
 --schermate salva una schermata per scenario. Esce 1 se una verifica fallisce.
@@ -44,6 +47,9 @@ PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
 PARTITA_SORGENTE = "2026-11-08-001923-bottone-a-secco-boom"
 FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
+PARTITA_AZIONI = "2026-10-27-115351-telefono-riformula"
+BUS = ORCHESTRA / "bin" / "bus"
+PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
 VELOCITA_REPLAY = "20"
 ATTESA_MS = 60000
 
@@ -245,6 +251,58 @@ def scenario_sorgente(pagina, schermate, log):
             pagina.screenshot(path=str(schermate / "vista-bottone-a-secco.png"))
 
 
+def comandi_fuori_bus_dal_transcript(session_id):
+    """I comandi Bash che non sono del bus, letti direttamente dal transcript della sessione:
+    l'oracolo del collaudo non passa dal parser del motore che sta collaudando."""
+    trovati = sorted(PROGETTI_CLAUDE.glob(f"*/{session_id}.jsonl"))
+    if not trovati:
+        return None
+    comandi = []
+    for riga in trovati[0].read_text(encoding="utf-8").splitlines():
+        record = json.loads(riga)
+        contenuto = (record.get("message") or {}).get("content")
+        if record.get("type") != "assistant" or not isinstance(contenuto, list):
+            continue
+        for blocco in contenuto:
+            if blocco.get("type") == "tool_use" and blocco["name"] == "Bash":
+                comando = blocco["input"]["command"]
+                if not comando.lstrip().startswith(str(BUS)):
+                    comandi.append(comando)
+    return comandi
+
+
+def azioni_dopo_clic(pagina, id_nodo):
+    """Il clic sul nodo, poi l'elenco `azioni` del suo nodo-chiuso come lo mostra il pannello."""
+    pagina.locator(f'[data-nodo="{id_nodo}"] circle').click()
+    dettaglio = json.loads(pagina.locator("#dettaglio-json").text_content())
+    titolo = pagina.locator("#dettaglio-titolo").text_content()
+    chiusure = [evento for evento in dettaglio["eventi"] if evento["tipo"] == "nodo-chiuso"]
+    return titolo, chiusure[0]["riga"]["azioni"] if len(chiusure) == 1 else None
+
+
+def scenario_azioni(pagina, schermate, _log):
+    print(f"azioni fuori bus {PARTITA_AZIONI}")
+    nodi = json.loads((ORCHESTRA / "partite" / PARTITA_AZIONI / "nodi.json").read_text(encoding="utf-8"))["nodi"]
+    with Harness("replay", PARTITA_AZIONI, "--velocita", VELOCITA_REPLAY) as harness:
+        apri_e_attendi(pagina, harness.indirizzo)
+        pagina.wait_for_selector('[data-nodo="D"].chiuso', state="attached", timeout=ATTESA_MS)
+        titolo, azioni_b = azioni_dopo_clic(pagina, "B")
+        verifica("il clic su B apre il dettaglio del nodo B", titolo == "nodo · B", titolo)
+        comandi_b = comandi_fuori_bus_dal_transcript(nodi["B"]["sessionId"])
+        verifica("il transcript di B si legge e porta un comando fuori bus", comandi_b is not None and len(comandi_b) == 1, f"{comandi_b}")
+        verifica("clic su B: un'azione, errore no", azioni_b is not None and len(azioni_b) == 1 and azioni_b[0]["errore"] is False, f"{azioni_b}")
+        if comandi_b and azioni_b:
+            verifica("clic su B: comando uguale carattere per carattere al transcript", azioni_b[0]["comando"] == comandi_b[0],
+                     f"{len(azioni_b[0]['comando'])} contro {len(comandi_b[0])} caratteri")
+        _, azioni_a = azioni_dopo_clic(pagina, "A")
+        verifica("clic su A: un'azione, errore sì", azioni_a is not None and len(azioni_a) == 1 and azioni_a[0]["errore"] is True, f"{azioni_a}")
+        _, azioni_c = azioni_dopo_clic(pagina, "C")
+        verifica("clic su C: elenco vuoto", azioni_c == [], f"{azioni_c}")
+        if schermate:
+            azioni_dopo_clic(pagina, "B")
+            pagina.screenshot(path=str(schermate / "vista-azioni-fuori-bus.png"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--schermate", type=Path)
@@ -254,7 +312,7 @@ def main():
     log = righe_del_log()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_sorgente):
+        for scenario in (scenario_controllo, scenario_rifiuto, scenario_spawn, scenario_sorgente, scenario_azioni):
             pagina = browser.new_page(viewport={"width": 1400, "height": 900})
             errori_pagina = []
             pagina.on("pageerror", lambda errore: errori_pagina.append(str(errore)))
