@@ -1,3 +1,5 @@
-registro/.messaggi.lock
 __pycache__/
-partite/*/.grafo.lock
+# Lo stato di un progetto vive fuori dal motore (antfarm D17): partite e
+# registro stanno nel cappello privato, mai in questo repo.
+partite/
+registro/
