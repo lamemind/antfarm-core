@@ -13,22 +13,36 @@ Il motore minimo dell'orchestrazione agentica: sessioni che si parlano lungo un 
 
 ## Dove sta cosa
 
+Il motore ha due radici. La **radice del codice** è questa cartella: `bin/`, `giochi/`, `schema/`, `vista/`, `template/`, `test/`. La **radice dello stato** (`<stato>` nella tabella) è la cartella di un progetto che usa il motore: `partite/` e `registro/` stanno lì, mai qui, e nascono al primo uso.
+
+La radice dello stato la sceglie chi lancia, con la variabile d'ambiente `ANTFARM_STATE_DIR`, obbligatoria e senza default. Regia, bus, harness e osservatore escono con codice 2 e il motivo su stderr se la variabile manca, se il path non è una cartella esistente, o se è la cartella del motore o ci sta dentro: una radice scritta male non nasce in silenzio, e una scrittura dentro il motore non si vedrebbe in `git status`, perché `.gitignore` ignora `partite/` e `registro/`. Validatori e `bin/vista.py` non toccano lo stato e girano senza variabile. Dalla cartella del progetto:
+
+```
+ANTFARM_STATE_DIR=. <motore>/bin/regia.py telefono --a-secco
+```
+
+Lo stato sta fuori dal motore per due ragioni: un motore installato serve molti progetti, e una partita porta il testo intero dei messaggi fra agenti e i path della macchina, quindi non entra mai nella storia di questo repo pubblico.
+
+La regia risolve la radice una volta, in path assoluto, e la passa ai suoi figli: i comandi del bus della regia e i nodi script la ereditano dall'ambiente, i nodi LLM la ricevono nel blocco `env` di `--settings`. Il bus la legge solo dall'ambiente, mai da un argomento: `Bash(<bus> *)` lascia al nodo ogni argomento dopo il path del bus, e un default sulla cartella corrente punterebbe alla cartella di lavoro del nodo, dentro la partita.
+
 | Path | Contenuto |
 | --- | --- |
-| `registro/partite.tsv` | registro delle partite (`$P`): una riga per partita, colonne `partita · gioco · esito · turni_umani · token · cwd` |
-| `registro/messaggi.jsonl` | log dei messaggi (`$M`): una riga per invio consegnato, invio rifiutato, lettura, scrittura in una sorgente; ogni riga porta l'id della partita e la versione del grafo |
+| `<stato>/registro/partite.tsv` | registro delle partite (`$P`): una riga per partita, colonne `partita · gioco · esito · turni_umani · token · cwd` |
+| `<stato>/registro/messaggi.jsonl` | log dei messaggi (`$M`): una riga per invio consegnato, invio rifiutato, lettura, scrittura in una sorgente; ogni riga porta l'id della partita e la versione del grafo |
 | `template/` | template di spawn (`$G`) |
 | `giochi/<gioco>/` | definizione di un gioco: grafo o grafi, prompt dei nodi, regole, oracolo, rapporto, nodo script |
-| `partite/<partita>/` | una partita: `grafo.json`, `grafi/v<N>.json` (ogni versione del grafo con l'ora di entrata in vigore), `nodi.json`, `meta.json`, `caselle/<nodo>/`, `nodi/<nodo>/` (cwd della sessione del nodo), il file di ogni sorgente al suo `percorso`, `rapporto.md` |
+| `<stato>/partite/<partita>/` | una partita: `grafo.json`, `grafi/v<N>.json` (ogni versione del grafo con l'ora di entrata in vigore), `nodi.json`, `meta.json`, `caselle/<nodo>/`, `nodi/<nodo>/` (cwd della sessione del nodo), il file di ogni sorgente al suo `percorso`, `rapporto.md` |
 | `schema/` | schema del grafo e schema degli eventi dell'harness |
 | `vista/` | la pagina della vista web, servita dall'harness |
-| `test/contro-prove.sh` | contro-prove deterministiche dei due validatori, della vista per agente, del bus, della sorgente, del nodo umano, delle azioni fuori bus, della versione nuova del grafo, del delta e dell'oracolo e del rapporto del cadavere, su una copia isolata del motore |
+| `test/contro-prove.sh` | contro-prove deterministiche dei due validatori, della vista per agente, del bus, della sorgente, del nodo umano, delle azioni fuori bus, della versione nuova del grafo, del delta e dell'oracolo e del rapporto del cadavere, su una copia isolata del motore con la radice dello stato in una cartella temporanea |
 | `test/grafi/` | grafi di contro-prova: invalidi per il validatore, `sorgente.json` e `umano.json` per il bus |
 | `test/eventi/`, `test/flussi/` | eventi di contro-prova del validatore, flussi di eventi sintetici per l'harness |
 
 ## Collaudo
 
-- `test/contro-prove.sh` — senza LLM, su una copia del motore in una cartella temporanea: il registro vero non riceve righe
+`test/collaudo-harness.sh`, `test/collaudo-vista.py` e `test/primo-falsificatore.py` rigiocano o leggono partite di riferimento, anche con nodi LLM, coi loro id scritti nel file, e le leggono dalla radice dello stato di chi lancia: passano solo con `ANTFARM_STATE_DIR` puntata al progetto che le ha giocate, ed escono 2 senza. Una partita con nodi LLM non diventa una fixture di questo repo, perché porta il testo intero dei messaggi.
+
+- `test/contro-prove.sh` — senza LLM, su una copia del motore in una cartella temporanea, con `ANTFARM_STATE_DIR` puntata a una cartella sorella qualunque sia l'ambiente di chi lancia: il registro vero non riceve righe. Non legge partite registrate: le due partite a secco del cadavere su cui compone il rapporto le gioca a ogni esecuzione, una ventina di secondi, quindi esce 0 su qualunque clone del motore
 - `test/collaudo-harness.sh` — senza LLM: rigioca le partite di riferimento e confronta gli eventi ricevuti dal client di prova (`bin/ascolta.py`) col log dei messaggi e con `nodi.json`, l'elenco delle azioni fuori bus compreso; controlla che registro e log non cambino, che la porta sia legata solo a `127.0.0.1`, e gioca una partita a secco dal vivo su una copia del motore, misurando il ritardo fra la riga del log e l'arrivo al client. Sul grafo che cambia: nel replay di un cadavere a secco `partita-aperta` porta la versione 1, un solo `grafo-cambiato` porta il delta e il file della versione intatto, e arriva prima del lancio di D e del primo messaggio con la versione 2; lo stesso ordine vale in una seconda partita a secco dal vivo
 - `test/collaudo-vista.py` — senza LLM, Chromium headless pilotato da Playwright: conta nodi, archi e pallini dal DOM contro `grafo.json` e il log, controlla che ogni pallino corra sul proprio arco, che il rifiuto resti sul mittente, che il clic porti la riga del log intatta, che lo spawn sintetico aggiunga figlio e archi, che dopo un `grafo-cambiato` — sintetico e nel replay di un cadavere a secco — il DOM porti i nodi e gli archi della versione nuova, nessun arco tolto, e ogni pallino già corso resti fermo sul suo destinatario, che la scrittura di una partita a secco del bottone rosso corra sull'arco verso la sorgente, che il clic su un nodo porti il comando di una sua azione fuori bus uguale al transcript
 - `test/primo-falsificatore.py` — senza LLM: legge i transcript di ogni partita del registro, senza passare dal parser del motore, e conta le voci `user` dopo il lancio che non sono un `tool_result`. Una partita conta se ha il rapporto, ogni transcript e 0 voci estranee; esce 0 se i giochi diversi che contano sono almeno 3
@@ -48,10 +62,11 @@ Le sezioni comuni dei rapporti — messaggi per arco e per nodo, token per nodo,
 
 ## Il nodo
 
-Un nodo LLM è una sessione Claude Code lanciata dalla regia con `claude --bg --safe-mode --tools Bash --allowedTools "Bash(<orchestra>/bin/bus *)" --permission-mode dontAsk`, nella propria cartella `partite/<partita>/nodi/<nodo>/`:
+Un nodo LLM è una sessione Claude Code lanciata dalla regia con `claude --bg --safe-mode --tools Bash --allowedTools "Bash(<orchestra>/bin/bus *)" --permission-mode dontAsk`, nella propria cartella `<stato>/partite/<partita>/nodi/<nodo>/`:
 
 - **nessun tool oltre a Bash**, e in Bash solo il bus: `SendMessage` e `ListAgents` non arrivano al modello, quindi il canale nativo fra sessioni non scavalca il grafo
 - **la cartella del nodo è vuota e le caselle stanno fuori**: in `dontAsk` Claude Code lascia passare i comandi di sola lettura dentro la cartella di lavoro (`ls` passa, `cat /etc/hostname` no), e una casella dentro la cartella sarebbe leggibile senza bus
+- **la radice dello stato arriva nell'ambiente**: `--settings` porta nel blocco `env` `ANTFARM_STATE_DIR` in path assoluto, accanto ai timeout del tool Bash, e il bus la legge da lì
 - **l'id della sessione lo assegna il servizio**: `--bg` ignora `--session-id`, e la regia legge `sessionId` e `pid` da `claude agents --json` e li scrive in `nodi.json`
 - **`--safe-mode` spegne CLAUDE.md, hook, plugin e output style**: il transcript del nodo porta solo il prompt della regia e i messaggi del bus
 
@@ -67,7 +82,7 @@ Un messaggio arriva al nodo come `tool_result` di `bus recv`, quindi nel transcr
 
 ## Harness e vista
 
-`bin/harness.py` legge le sorgenti del motore, ne fa eventi e li pubblica su un WebSocket; `vista/` è la pagina che li disegna. L'harness legge soltanto: non scrive in `registro/` né in `partite/`, perché un osservatore che scrive dove scrive il motore ne sposterebbe le misure.
+`bin/harness.py` legge le sorgenti del motore, ne fa eventi e li pubblica su un WebSocket; `vista/` è la pagina che li disegna. L'harness legge soltanto, dalla radice dello stato: non scrive in `registro/` né in `partite/`, perché un osservatore che scrive dove scrive il motore ne sposterebbe le misure.
 
 - **gli eventi** — tre classi, schema in `schema/evento.schema.json`: `sessione` (`partita-aperta`, `partita-chiusa`, `nodo-lanciato`, `nodo-chiuso`, da `meta.json` e `nodi.json`; `grafo-cambiato`, da `grafi/`), `messaggio` (`consegnato`, `rifiutato`, `letto`, `scritto`: una riga del log dei messaggi ciascuno), `spawn`. Ogni evento porta in cima `classe`, `tipo`, `ts`, `partita` e nel campo `riga` la riga sorgente intatta, quindi un campo nuovo del bus non cambia lo schema. Un messaggio porta anche `indice`, il numero della sua riga nel log: la chiave di un messaggio è partita più indice, perché un rifiuto ha `id` null. `partita-aperta` porta `meta.json` e la prima versione del grafo, e la vista disegna da lì: a partita chiusa `grafo.json` è già l'ultima versione. `grafo-cambiato` porta nella `riga` il file `grafi/v<N>.json` intatto e in cima il delta rispetto alla versione precedente — `versione`, `nodi_aggiunti`, `nodi_tolti`, `archi_aggiunti`, `archi_tolti` —, e il suo `ts` è l'ora di entrata in vigore; un arco che cambia i diritti e un nodo che cambia un campo stanno fra i tolti e fra gli aggiunti. Lo spawn porta genitore, figlio, template e il delta del grafo — nodi, archi, versione —, perché il template fissa gli archi del figlio per ruolo. Le righe del log senza partita (`mittente-ignoto`) non diventano eventi: l'harness le conta e stampa il conteggio su stderr alla chiusura. `bin/valida-eventi.py <eventi.jsonl>` è il gate del formato: esce 0 se ogni riga è un evento valido e coerente con la sua riga sorgente, 1 altrimenti
 - **l'accensione** — una porta sola, legata a `127.0.0.1`, default 8740 (`--porta 0` la fa scegliere al sistema): `/` serve la vista, `/canale.json` il modo e la velocità, `/eventi` il WebSocket. La prima riga su stdout porta l'indirizzo. Il WebSocket rifiuta con 403 una pagina d'altra origine, perché il log porta il testo integrale dei messaggi. Si ferma con SIGINT o SIGTERM
@@ -80,6 +95,7 @@ Un messaggio arriva al nodo come `tool_result` di `bus recv`, quindi nel transcr
 Dal vivo, con la vista nel browser:
 
 ```
+export ANTFARM_STATE_DIR=<progetto>               # partite/ e registro/ stanno qui
 orchestra/bin/harness.py vivo                     # poi apri http://127.0.0.1:8740/
 orchestra/bin/regia.py telefono --regola riformula
 ```
