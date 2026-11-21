@@ -3,10 +3,13 @@
 #
 #   orchestra/test/contro-prove.sh
 #
-# Gira su una copia di bin/ e schema/ in una cartella temporanea: il bus ricava la propria radice
-# dal path in cui sta, quindi la copia ha caselle, partite e log dei messaggi suoi, e il registro
-# vero del motore non riceve righe di prova. Un nodo è un sottoprocesso bash che si registra in
-# nodi.json con la propria coppia (pid, starttime), come fa la regia con le sessioni.
+# Gira su una copia di bin/, schema/ e giochi/ in una cartella temporanea, con la radice dello stato
+# (ANTFARM_STATE_DIR) puntata a una cartella sorella della copia: caselle, partite e log dei
+# messaggi sono suoi, e il registro vero di un progetto non riceve righe di prova, qualunque sia
+# l'ambiente di chi lancia. Non legge nessuna partita registrata: le due partite a secco del
+# cadavere su cui compone il rapporto le gioca qui, quindi esce 0 su qualunque clone del motore.
+# Un nodo è un sottoprocesso bash che si registra in nodi.json con la propria coppia
+# (pid, starttime), come fa la regia con le sessioni.
 # Esce 1 se una contro-prova fallisce.
 set -uo pipefail
 
@@ -14,10 +17,14 @@ ORCHESTRA=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 GRAFO_TELEFONO="$ORCHESTRA/giochi/telefono/grafo.json"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-cp -r "$ORCHESTRA/bin" "$ORCHESTRA/schema" "$TMP/"
-BUS="$TMP/bin/bus"
-PARTITA="$TMP/partite/prova"
-LOG="$TMP/registro/messaggi.jsonl"
+MOTORE="$TMP/motore"
+STATO="$TMP/stato"
+mkdir -p "$MOTORE" "$STATO"
+cp -r "$ORCHESTRA/bin" "$ORCHESTRA/schema" "$ORCHESTRA/giochi" "$MOTORE/"
+export ANTFARM_STATE_DIR="$STATO"
+BUS="$MOTORE/bin/bus"
+PARTITA="$STATO/partite/prova"
+LOG="$STATO/registro/messaggi.jsonl"
 mkdir -p "$PARTITA"
 cp "$GRAFO_TELEFONO" "$PARTITA/grafo.json"
 printf '{"partita": "prova", "stato": "aperta", "nodi": {}}\n' > "$PARTITA/nodi.json"
@@ -57,40 +64,40 @@ come_nodo() { # <nodo> <comando...>: esegue il comando come figlio di un process
 }
 
 echo "validatore"
-verifica "grafo del telefono valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFO_TELEFONO"
+verifica "grafo del telefono valido → 0" "$MOTORE/bin/valida-grafo.py" "$GRAFO_TELEFONO"
 verifica "arco verso un nodo inesistente → ≠0" \
-  bash -c "! '$TMP/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/arco-verso-nodo-inesistente.json'"
+  bash -c "! '$MOTORE/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/arco-verso-nodo-inesistente.json'"
 verifica "diritto fuori dall'elenco → ≠0" \
-  bash -c "! '$TMP/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/diritto-fuori-elenco.json'"
+  bash -c "! '$MOTORE/bin/valida-grafo.py' '$ORCHESTRA/test/grafi/diritto-fuori-elenco.json'"
 
 echo "validatore degli eventi"
 verifica "evento messaggio ricavato da una riga del log → 0" \
-  "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/eventi/messaggio-valido.jsonl"
+  "$MOTORE/bin/valida-eventi.py" "$ORCHESTRA/test/eventi/messaggio-valido.jsonl"
 verifica "classe fuori dall'elenco → ≠0" \
-  bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/classe-fuori-elenco.jsonl'"
+  bash -c "! '$MOTORE/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/classe-fuori-elenco.jsonl'"
 verifica "evento messaggio senza id della partita → ≠0" \
-  bash -c "! '$TMP/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/messaggio-senza-partita.jsonl'"
-verifica "flusso sintetico dello spawn → 0" "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/spawn.jsonl"
+  bash -c "! '$MOTORE/bin/valida-eventi.py' '$ORCHESTRA/test/eventi/messaggio-senza-partita.jsonl'"
+verifica "flusso sintetico dello spawn → 0" "$MOTORE/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/spawn.jsonl"
 jq -c 'if .classe == "spawn" then .delta.archi |= map(select(.da != "redattore")) else . end' \
   "$ORCHESTRA/test/flussi/spawn.jsonl" > "$TMP/spawn-senza-arco.jsonl"
 verifica "spawn senza l'arco genitore → figlio nel delta → ≠0" \
-  bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/spawn-senza-arco.jsonl'"
+  bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/spawn-senza-arco.jsonl'"
 
-verifica "flusso sintetico del grafo cambiato → 0" "$TMP/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/grafo-cambiato.jsonl"
+verifica "flusso sintetico del grafo cambiato → 0" "$MOTORE/bin/valida-eventi.py" "$ORCHESTRA/test/flussi/grafo-cambiato.jsonl"
 FLUSSO_CAMBIO="$ORCHESTRA/test/flussi/grafo-cambiato.jsonl"
 jq -c 'if .tipo == "grafo-cambiato" then del(.delta) else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-senza-delta.jsonl"
-verifica "grafo-cambiato senza delta → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-senza-delta.jsonl'"
+verifica "grafo-cambiato senza delta → ≠0" bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/cambio-senza-delta.jsonl'"
 jq -c 'if .tipo == "grafo-cambiato" then .delta.versione = 3 else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-altra-versione.jsonl"
-verifica "delta con versione diversa da quella del grafo → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-altra-versione.jsonl'"
+verifica "delta con versione diversa da quella del grafo → ≠0" bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/cambio-altra-versione.jsonl'"
 jq -c 'if .tipo == "grafo-cambiato" then .ts = "2026-11-08T10:00:11.000+01:00" else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-altra-ora.jsonl"
-verifica "ts dell'evento diverso da in_vigore → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-altra-ora.jsonl'"
+verifica "ts dell'evento diverso da in_vigore → ≠0" bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/cambio-altra-ora.jsonl'"
 jq -c 'if .tipo == "grafo-cambiato" then .delta.archi_tolti = [{"da": "A", "a": "B", "diritti": ["scrive"]}] else . end' "$FLUSSO_CAMBIO" > "$TMP/cambio-tolto-presente.jsonl"
-verifica "un arco tolto ancora presente nel grafo → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/cambio-tolto-presente.jsonl'"
+verifica "un arco tolto ancora presente nel grafo → ≠0" bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/cambio-tolto-presente.jsonl'"
 jq -c 'if .tipo == "partita-aperta" then .delta = {"versione": 2, "nodi_aggiunti": [], "nodi_tolti": [], "archi_aggiunti": [], "archi_tolti": []} else . end' "$FLUSSO_CAMBIO" > "$TMP/delta-fuori-posto.jsonl"
-verifica "delta su un evento che non è grafo-cambiato → ≠0" bash -c "! '$TMP/bin/valida-eventi.py' '$TMP/delta-fuori-posto.jsonl'"
+verifica "delta su un evento che non è grafo-cambiato → ≠0" bash -c "! '$MOTORE/bin/valida-eventi.py' '$TMP/delta-fuori-posto.jsonl'"
 
 echo "delta del grafo"
-DELTA=$(python3 - "$TMP" <<'PY'
+DELTA=$(python3 - "$MOTORE" <<'PY'
 import json, sys
 sys.path.insert(0, f"{sys.argv[1]}/bin")
 import grafo as libgrafo
@@ -117,11 +124,11 @@ verifica "delta: arco nuovo fra gli aggiunti, arco sparito fra i tolti" \
   jq -e '([.archi_aggiunti[] | select(.a == "C")] | length == 1) and ([.archi_tolti[] | select(.a == "X")] | length == 1)' <<< "$DELTA"
 
 echo "vista"
-VISTA_B=$("$TMP/bin/vista.py" "$GRAFO_TELEFONO" B)
+VISTA_B=$("$MOTORE/bin/vista.py" "$GRAFO_TELEFONO" B)
 verifica "vista di B: C è l'unico destinatario di scrive" grep -qx 'Puoi scrivere a: C' <<< "$VISTA_B"
 verifica "vista di B: porta la versione del grafo" grep -q 'grafo versione 1$' <<< "$VISTA_B"
 verifica "vista di B: A e D non compaiono" bash -c "! grep -qE '\\b(A|D)\\b' <<< '$VISTA_B'"
-verifica "vista di un nodo inesistente → ≠0" bash -c "! '$TMP/bin/vista.py' '$GRAFO_TELEFONO' Z"
+verifica "vista di un nodo inesistente → ≠0" bash -c "! '$MOTORE/bin/vista.py' '$GRAFO_TELEFONO' Z"
 
 echo "bus"
 come_nodo A "$BUS" send D "ciao D, salto B e C"
@@ -155,7 +162,7 @@ come_nodo A "$BUS" send B "a partita chiusa"
 verifica "partita chiusa: anche un nodo registrato è rifiutato" test $? -ne 0
 
 echo "versione nuova del grafo a partita aperta"
-PARTITA_VERSIONE=$(python3 - "$TMP" "$GRAFO_TELEFONO" <<'PY'
+PARTITA_VERSIONE=$(python3 - "$MOTORE" "$GRAFO_TELEFONO" <<'PY'
 import copy, hashlib, json, sys
 from pathlib import Path
 
@@ -188,7 +195,7 @@ Path(radice, "versione-rifiuti.json").write_text(json.dumps({
 print(partita.cartella)
 PY
 )
-RIFIUTI_VERSIONE=$(cat "$TMP/versione-rifiuti.json")
+RIFIUTI_VERSIONE=$(cat "$MOTORE/versione-rifiuti.json")
 PARTITA=$PARTITA_VERSIONE
 verifica "versione non cresciuta → rifiutata" jq -e '.rifiuti.stesso_numero | contains("versione 1 invece di 2")' <<< "$RIFIUTI_VERSIONE"
 verifica "versione che salta un numero → rifiutata" jq -e '.rifiuti.salta_un_numero | contains("versione 3 invece di 2")' <<< "$RIFIUTI_VERSIONE"
@@ -200,7 +207,7 @@ ID_VERSIONE=$(basename "$PARTITA")
 come_nodo A "$BUS" send B "prima del cambio"
 verifica "prima del cambio A → B porta versione 1" \
   jq -e -s --arg p "$ID_VERSIONE" 'any(.[]; .partita==$p and .esito=="consegnato" and .da=="A" and .a=="B" and .versione==1)' "$LOG"
-IN_VIGORE=$(python3 - "$TMP" "$PARTITA" "$GRAFO_TELEFONO" <<'PY'
+IN_VIGORE=$(python3 - "$MOTORE" "$PARTITA" "$GRAFO_TELEFONO" <<'PY'
 import copy, json, sys
 from pathlib import Path
 
@@ -240,21 +247,21 @@ sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 
 echo "sorgente: validatore"
 GRAFI="$ORCHESTRA/test/grafi"
-verifica "grafo con la sorgente bottone valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFI/sorgente.json"
+verifica "grafo con la sorgente bottone valido → 0" "$MOTORE/bin/valida-grafo.py" "$GRAFI/sorgente.json"
 for invalido in sorgente-percorso-assoluto sorgente-percorso-fuori sorgente-senza-percorso sorgente-che-parla percorso-su-nodo-llm; do
-  verifica "$invalido → ≠0" bash -c "! '$TMP/bin/valida-grafo.py' '$GRAFI/$invalido.json'"
+  verifica "$invalido → ≠0" bash -c "! '$MOTORE/bin/valida-grafo.py' '$GRAFI/$invalido.json'"
 done
 
 echo "sorgente: vista"
-VISTA_A=$("$TMP/bin/vista.py" "$GRAFI/sorgente.json" A)
-VISTA_SB=$("$TMP/bin/vista.py" "$GRAFI/sorgente.json" B)
+VISTA_A=$("$MOTORE/bin/vista.py" "$GRAFI/sorgente.json" A)
+VISTA_SB=$("$MOTORE/bin/vista.py" "$GRAFI/sorgente.json" B)
 verifica "vista di A: la sorgente non sta fra i nodi a cui scrivere" grep -qx 'Puoi scrivere a: B' <<< "$VISTA_A"
 verifica "vista di A: bottone sulla riga delle sorgenti" \
   grep -qx 'Puoi scrivere i file (sorgenti, con bus scrivi): bottone' <<< "$VISTA_A"
 verifica "vista di B: nessuna riga delle sorgenti" bash -c "! grep -q 'sorgenti' <<< '$VISTA_SB'"
 
 echo "sorgente: bus scrivi"
-PARTITA="$TMP/partite/prova-sorgente"
+PARTITA="$STATO/partite/prova-sorgente"
 mkdir -p "$PARTITA/bottone"
 cp "$GRAFI/sorgente.json" "$PARTITA/grafo.json"
 printf '{"partita": "prova-sorgente", "stato": "aperta", "nodi": {}}\n' > "$PARTITA/nodi.json"
@@ -286,12 +293,12 @@ verifica "A scrivi bottone: riga scritto nel log, da A a bottone, testo BOOM" \
 verifica "A scrivi bottone: il file porta BOOM" grep -qx BOOM "$BOTTONE"
 jq -c 'select(.partita=="prova-sorgente" and .esito=="scritto") | {classe: "messaggio", tipo: .esito, ts, partita, indice: 1, riga: .}' \
   "$LOG" > "$TMP/scritto.jsonl"
-verifica "evento messaggio/scritto dalla riga del log → valido" "$TMP/bin/valida-eventi.py" "$TMP/scritto.jsonl"
+verifica "evento messaggio/scritto dalla riga del log → valido" "$MOTORE/bin/valida-eventi.py" "$TMP/scritto.jsonl"
 sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 
 echo "nodo umano"
-verifica "grafo col nodo umano valido → 0" "$TMP/bin/valida-grafo.py" "$GRAFI/umano.json"
-PARTITA="$TMP/partite/prova-umano"
+verifica "grafo col nodo umano valido → 0" "$MOTORE/bin/valida-grafo.py" "$GRAFI/umano.json"
+PARTITA="$STATO/partite/prova-umano"
 mkdir -p "$PARTITA/caselle" "$PARTITA/nodi"
 cp "$GRAFI/umano.json" "$PARTITA/grafo.json"
 printf '{"partita": "prova-umano", "stato": "aperta", "nodi": {}}\n' > "$PARTITA/nodi.json"
@@ -301,7 +308,7 @@ verifica "A send umano: una riga consegnato nel log, da A a umano" \
   jq -e -s '[.[] | select(.partita=="prova-umano" and .esito=="consegnato" and .da=="A" and .a=="umano")] | length == 1' "$LOG"
 verifica "il messaggio resta nella casella dell'umano" \
   test "$(find "$PARTITA/caselle/umano" -maxdepth 1 -name '[0-9]*.json' | wc -l)" -eq 1
-REGISTRA_UMANO=$(python3 - "$TMP/bin" "$PARTITA" <<'PY' 2>&1
+REGISTRA_UMANO=$(python3 - "$MOTORE/bin" "$PARTITA" <<'PY' 2>&1
 import sys
 sys.path.insert(0, sys.argv[1])
 import partita
@@ -316,7 +323,7 @@ PY
 )
 verifica "la regia non registra un processo per umano" grep -q '^rifiutato: umano è un nodo umano' <<< "$REGISTRA_UMANO"
 verifica "nodi.json non porta una voce per umano" jq -e '.nodi | has("umano") | not' "$PARTITA/nodi.json"
-CONTEGGIO_UMANO=$(python3 - "$TMP/bin" "$LOG" "$PARTITA" <<'PY'
+CONTEGGIO_UMANO=$(python3 - "$MOTORE/bin" "$LOG" "$PARTITA" <<'PY'
 import json, sys
 sys.path.insert(0, sys.argv[1])
 import misure
@@ -330,15 +337,15 @@ verifica "conteggio del rapporto: 1 messaggio, 0 letti, 0 risposte, 1 in casella
 sed -i 's/"aperta"/"chiusa"/' "$PARTITA/nodi.json"
 
 echo "azioni fuori bus"
-AZIONI=$(python3 - "$TMP" <<'PY'
+AZIONI=$(python3 - "$MOTORE" "$STATO" "$TMP/transcript" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 
-radice = Path(sys.argv[1])
+radice, stato = Path(sys.argv[1]), Path(sys.argv[2])
 sys.path.insert(0, str(radice / "bin"))
 import partita as libpartita
 
-libpartita.PROGETTI_CLAUDE = radice / "transcript"
+libpartita.PROGETTI_CLAUDE = Path(sys.argv[3])
 subprocess.run = lambda *argomenti, **opzioni: None  # `claude stop` non ha una sessione da fermare
 bus = str(libpartita.BUS)
 DENIED = "Permission to use Bash has been denied."
@@ -360,7 +367,7 @@ def transcript(sessione, blocchi):
             file_transcript.write(json.dumps({"type": tipo, "message": {"content": [blocco]}}) + "\n")
 
 
-cartella = radice / "partite" / "prova-azioni"
+cartella = stato / "partite" / "prova-azioni"
 cartella.mkdir(parents=True)
 partita = libpartita.Partita(cartella)
 voci = {
@@ -476,7 +483,7 @@ verifica "riscrittura: transcript sparito → problema" jq -e '.problemi.S | con
 verifica "riscrittura: un secondo giro non cambia il file" jq -e '.idempotente' <<< "$AZIONI"
 
 echo "classe di un'azione"
-CLASSI=$(python3 - "$TMP" <<'PY'
+CLASSI=$(python3 - "$MOTORE" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -567,13 +574,13 @@ verifica "catena senza C → D: esito interrotta" jq -e '.interrotto == "interro
 echo "il cadavere squisito: grafi, prompt, oracolo"
 V1="$ORCHESTRA/giochi/cadavere/grafo-v1.json"
 V2="$ORCHESTRA/giochi/cadavere/grafo-v2.json"
-verifica "grafo v1 del cadavere valido → 0" "$TMP/bin/valida-grafo.py" "$V1"
-verifica "grafo v2 del cadavere valido → 0" "$TMP/bin/valida-grafo.py" "$V2"
-VISTA_D=$("$TMP/bin/vista.py" "$V2" D)
+verifica "grafo v1 del cadavere valido → 0" "$MOTORE/bin/valida-grafo.py" "$V1"
+verifica "grafo v2 del cadavere valido → 0" "$MOTORE/bin/valida-grafo.py" "$V2"
+VISTA_D=$("$MOTORE/bin/vista.py" "$V2" D)
 verifica "vista di D: porta la versione 2" grep -q 'grafo versione 2$' <<< "$VISTA_D"
 verifica "vista di D: l'arco D → A" grep -q '^- D → A: ' <<< "$VISTA_D"
-verifica "vista di C dopo il cambio: scrive a D e non più ad A" grep -qx 'Puoi scrivere a: D, regia' <<< "$("$TMP/bin/vista.py" "$V2" C)"
-CADAVERE=$(python3 - "$TMP" "$ORCHESTRA" "$V1" "$V2" <<'PY'
+verifica "vista di C dopo il cambio: scrive a D e non più ad A" grep -qx 'Puoi scrivere a: D, regia' <<< "$("$MOTORE/bin/vista.py" "$V2" C)"
+CADAVERE=$(python3 - "$MOTORE" "$ORCHESTRA" "$V1" "$V2" <<'PY'
 import json, sys
 radice, orchestra, v1, v2 = sys.argv[1:5]
 sys.path.insert(0, f"{radice}/bin")
@@ -638,20 +645,32 @@ verifica "solo D riceve l'ingresso a partita aperta" jq -e '.prompt_ingresso' <<
 verifica "delta v1 → v2: entra D, sparisce C → A, nascono C → D, D → A, D → regia" \
   jq -e '.delta_nodi == ["D"] and .delta_tolti == [["C","A"]] and .delta_aggiunti == [["C","D"],["D","A"],["D","regia"]] and .nodi_tolti == []' <<< "$CADAVERE"
 
-echo "il cadavere squisito: rapporto su una partita a secco già giocata"
-RAPPORTI=$(python3 - "$ORCHESTRA" 2026-11-08-114717-cadavere-a-secco 2026-11-08-114856-cadavere-contro-prova-a-secco <<'PY'
+echo "il cadavere squisito: rapporto su due partite a secco giocate qui"
+# Le due partite si giocano nella radice dello stato temporanea, in parallelo, una ventina di
+# secondi: una partita registrata non entra nel repo, perché porta i path della macchina.
+"$MOTORE/bin/regia.py" cadavere --a-secco > "$TMP/regia-cadavere.out" 2>&1 &
+REGIA_SECCO=$!
+"$MOTORE/bin/regia.py" cadavere --a-secco --contro-prova > "$TMP/regia-cadavere-contro-prova.out" 2>&1 &
+REGIA_CONTRO=$!
+wait "$REGIA_SECCO"
+verifica "partita a secco del cadavere: la regia esce 0" test $? -eq 0
+wait "$REGIA_CONTRO"
+verifica "contro-prova a secco del cadavere: la regia esce 0" test $? -eq 0
+PARTITA_SECCO=$(find "$STATO/partite" -maxdepth 1 -name '*-cadavere-a-secco' -printf '%f\n' | head -1)
+PARTITA_CONTRO=$(find "$STATO/partite" -maxdepth 1 -name '*-cadavere-contro-prova-a-secco' -printf '%f\n' | head -1)
+RAPPORTI=$(python3 - "$MOTORE" "$STATO" "$PARTITA_SECCO" "$PARTITA_CONTRO" <<'PY'
 import json, sys
 from pathlib import Path
-orchestra = Path(sys.argv[1])
-sys.path.insert(0, str(orchestra / "bin"))
-sys.path.insert(1, str(orchestra))
+motore, stato = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(motore / "bin"))
+sys.path.insert(1, str(motore))
 from giochi.cadavere import rapporto
 
 vuota = {"sessioni": [], "usage": {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, "token": 0}
 risultato = {}
-for chiave, partita in (("secco", sys.argv[2]), ("contro", sys.argv[3])):
-    testo = rapporto.componi(rapporto.misura(orchestra / "partite" / partita, orchestra / "registro" / "partite.tsv",
-                                             orchestra / "registro" / "messaggi.jsonl", vuota), vuota, "registro", "log")
+for chiave, partita in (("secco", sys.argv[3]), ("contro", sys.argv[4])):
+    testo = rapporto.componi(rapporto.misura(stato / "partite" / partita, stato / "registro" / "partite.tsv",
+                                             stato / "registro" / "messaggi.jsonl", vuota), vuota, "registro", "log")
     sezione = testo.split("## Il testo ricomposto")[1].split("## Messaggi partiti")[0]
     righe = [riga for riga in sezione.splitlines() if riga.startswith("| ") and not riga.startswith("| Posizione") and not riga.startswith("| ---")]
     risultato[chiave] = {"testo": testo, "righe_del_testo": len(righe), "prima": righe[0], "ultima": righe[-1], "avvertenze": sum("⚠️" in riga for riga in righe)}

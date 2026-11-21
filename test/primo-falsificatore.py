@@ -11,7 +11,8 @@ motore dichiara nel registro, quindi non ne eredita il parser.
 
 Una partita conta se ha `rapporto.md`, ogni transcript si trova e le voci estranee sono 0. Stampa una
 riga per partita e il conteggio dei giochi diversi con almeno una partita che conta.
-Esce 0 se i giochi diversi sono almeno 3, 1 altrimenti.
+Registro e partite li legge dalla radice dello stato, ANTFARM_STATE_DIR.
+Esce 0 se i giochi diversi sono almeno 3, 1 altrimenti, 2 senza ANTFARM_STATE_DIR.
 """
 
 import csv
@@ -19,9 +20,12 @@ import json
 import sys
 from pathlib import Path
 
-ORCHESTRA = Path(__file__).resolve().parent.parent
-REGISTRO = ORCHESTRA / "registro" / "partite.tsv"
-PARTITE = ORCHESTRA / "partite"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+import grafo as libgrafo  # noqa: E402
+
+STATO = libgrafo.radice_stato()
+REGISTRO = STATO / "registro" / "partite.tsv"
+PARTITE = STATO / "partite"
 PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
 SOGLIA_GIOCHI = 3
 

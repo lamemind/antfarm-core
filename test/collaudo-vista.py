@@ -33,8 +33,13 @@ poi conta e misura dal DOM — mai da un contatore della pagina:
   l'elenco delle azioni; il comando di B è uguale carattere per carattere a quello del suo
   transcript, letto qui senza passare dal codice del motore
 
+Le partite di riferimento, i loro id scritti qui sotto, e il log dei messaggi li legge dalla
+radice dello stato di chi lancia, ANTFARM_STATE_DIR, e l'harness che accende la eredita: il
+collaudo passa solo dove quello stato esiste.
+
 Playwright è fissato alla versione il cui Chromium è già in ~/.cache/ms-playwright. Con
---schermate salva una schermata per scenario. Esce 1 se una verifica fallisce.
+--schermate salva una schermata per scenario. Esce 1 se una verifica fallisce, 2 senza
+ANTFARM_STATE_DIR.
 """
 
 import argparse
@@ -48,8 +53,12 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ORCHESTRA = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ORCHESTRA / "bin"))
+import grafo as libgrafo  # noqa: E402
+
+STATO = libgrafo.radice_stato()
 HARNESS = ORCHESTRA / "bin" / "harness.py"
-LOG_MESSAGGI = ORCHESTRA / "registro" / "messaggi.jsonl"
+LOG_MESSAGGI = STATO / "registro" / "messaggi.jsonl"
 PARTITA_CONTROLLO = "2026-10-26-121427-telefono-copia"
 PARTITA_CONTRO_PROVA = "2026-10-26-120840-contro-prova-bus"
 PARTITA_SORGENTE = "2026-11-08-001923-bottone-a-secco-boom"
@@ -58,7 +67,6 @@ PARTITA_CADAVERE_LLM = "2026-11-08-115230-cadavere"
 FLUSSO_SPAWN = ORCHESTRA / "test" / "flussi" / "spawn.jsonl"
 FLUSSO_GRAFO_CAMBIATO = ORCHESTRA / "test" / "flussi" / "grafo-cambiato.jsonl"
 PARTITA_AZIONI = "2026-10-27-115351-telefono-riformula"
-BUS = ORCHESTRA / "bin" / "bus"
 PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
 VELOCITA_REPLAY = "20"
 ATTESA_MS = 60000
@@ -137,7 +145,7 @@ def dettaglio_dopo_clic(pagina, chiave):
 
 def scenario_controllo(pagina, schermate, log):
     print(f"partita di controllo {PARTITA_CONTROLLO}")
-    grafo = json.loads((ORCHESTRA / "partite" / PARTITA_CONTROLLO / "grafo.json").read_text(encoding="utf-8"))
+    grafo = json.loads((STATO / "partite" / PARTITA_CONTROLLO / "grafo.json").read_text(encoding="utf-8"))
     consegnati = {indice: riga for indice, riga in log.items()
                   if riga.get("partita") == PARTITA_CONTROLLO and riga["esito"] == "consegnato"}
     with Harness("replay", PARTITA_CONTROLLO, "--velocita", VELOCITA_REPLAY) as harness:
@@ -275,7 +283,7 @@ def scenario_grafo_cambiato(pagina, schermate, _log):
 
 def scenario_cadavere(pagina, schermate, log, partita):
     print(f"cadavere squisito {partita}")
-    cartella = ORCHESTRA / "partite" / partita
+    cartella = STATO / "partite" / partita
     v1 = json.loads((cartella / "grafi" / "v1.json").read_text(encoding="utf-8"))["grafo"]
     v2 = json.loads((cartella / "grafi" / "v2.json").read_text(encoding="utf-8"))["grafo"]
     coppie = lambda grafo: {(arco["da"], arco["a"]) for arco in grafo["archi"]}
@@ -304,7 +312,7 @@ def scenario_cadavere_llm(pagina, schermate, log):
 
 def scenario_sorgente(pagina, schermate, log):
     print(f"bottone a secco {PARTITA_SORGENTE}")
-    grafo = json.loads((ORCHESTRA / "partite" / PARTITA_SORGENTE / "grafo.json").read_text(encoding="utf-8"))
+    grafo = json.loads((STATO / "partite" / PARTITA_SORGENTE / "grafo.json").read_text(encoding="utf-8"))
     scritti = {indice: riga for indice, riga in log.items()
                if riga.get("partita") == PARTITA_SORGENTE and riga["esito"] == "scritto"}
     with Harness("replay", PARTITA_SORGENTE, "--velocita", VELOCITA_REPLAY) as harness:
@@ -334,7 +342,15 @@ def scenario_sorgente(pagina, schermate, log):
             pagina.screenshot(path=str(schermate / "vista-bottone-a-secco.png"))
 
 
-def comandi_fuori_bus_dal_transcript(session_id):
+def bus_del_lancio(voce_nodo):
+    """Il path del bus col quale il nodo ha giocato, dalla regola `Bash(<bus> *)` di --allowedTools
+    nel comando di lancio scritto in nodi.json. Una partita giocata da un motore che stava in
+    un'altra cartella porta nel transcript il bus di allora, non quello del motore di adesso."""
+    comando = voce_nodo["comando"]
+    return comando[comando.index("--allowedTools") + 1].removeprefix("Bash(").removesuffix(" *)")
+
+
+def comandi_fuori_bus_dal_transcript(session_id, bus):
     """I comandi Bash che non sono del bus, letti direttamente dal transcript della sessione:
     l'oracolo del collaudo non passa dal parser del motore che sta collaudando."""
     trovati = sorted(PROGETTI_CLAUDE.glob(f"*/{session_id}.jsonl"))
@@ -349,7 +365,7 @@ def comandi_fuori_bus_dal_transcript(session_id):
         for blocco in contenuto:
             if blocco.get("type") == "tool_use" and blocco["name"] == "Bash":
                 comando = blocco["input"]["command"]
-                if not comando.lstrip().startswith(str(BUS)):
+                if not comando.lstrip().startswith(bus):
                     comandi.append(comando)
     return comandi
 
@@ -365,13 +381,13 @@ def azioni_dopo_clic(pagina, id_nodo):
 
 def scenario_azioni(pagina, schermate, _log):
     print(f"azioni fuori bus {PARTITA_AZIONI}")
-    nodi = json.loads((ORCHESTRA / "partite" / PARTITA_AZIONI / "nodi.json").read_text(encoding="utf-8"))["nodi"]
+    nodi = json.loads((STATO / "partite" / PARTITA_AZIONI / "nodi.json").read_text(encoding="utf-8"))["nodi"]
     with Harness("replay", PARTITA_AZIONI, "--velocita", VELOCITA_REPLAY) as harness:
         apri_e_attendi(pagina, harness.indirizzo)
         pagina.wait_for_selector('[data-nodo="D"].chiuso', state="attached", timeout=ATTESA_MS)
         titolo, azioni_b = azioni_dopo_clic(pagina, "B")
         verifica("il clic su B apre il dettaglio del nodo B", titolo == "nodo · B", titolo)
-        comandi_b = comandi_fuori_bus_dal_transcript(nodi["B"]["sessionId"])
+        comandi_b = comandi_fuori_bus_dal_transcript(nodi["B"]["sessionId"], bus_del_lancio(nodi["B"]))
         verifica("il transcript di B si legge e porta un comando fuori bus", comandi_b is not None and len(comandi_b) == 1, f"{comandi_b}")
         verifica("clic su B: un'azione, errore no", azioni_b is not None and len(azioni_b) == 1 and azioni_b[0]["errore"] is False, f"{azioni_b}")
         if comandi_b and azioni_b:

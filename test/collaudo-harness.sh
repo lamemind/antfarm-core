@@ -15,18 +15,30 @@
 # sola lettura — sha256 del registro delle partite ($P) e di $M uguale prima e dopo i replay
 # porta locale — con l'harness acceso, ss -ltn mostra la porta legata solo a 127.0.0.1, e una
 #   connessione con un'origine estranea è rifiutata
-# dal vivo a secco — su una copia del motore in una cartella temporanea, come contro-prove.sh:
-#   harness acceso, client in ascolto, regia --a-secco; il client riceve ogni riga che la partita
-#   aggiunge al $M della copia, un nodo-chiuso per ogni nodo dopo il suo ultimo invio, e stampa il
-#   ritardo fra il ts della riga e l'arrivo (mediana, massimo); poi una partita a secco del cadavere,
-#   con grafo-cambiato prima del primo messaggio con la versione 2
+# dal vivo a secco — su una copia del motore in una cartella temporanea, con la radice dello stato
+#   in una cartella sorella della copia, come contro-prove.sh: harness acceso, client in ascolto,
+#   regia --a-secco; il client riceve ogni riga che la partita aggiunge al $M della copia, un
+#   nodo-chiuso per ogni nodo dopo il suo ultimo invio, e stampa il ritardo fra il ts della riga e
+#   l'arrivo (mediana, massimo); poi una partita a secco del cadavere, con grafo-cambiato prima del
+#   primo messaggio con la versione 2
 #
-# Esce 1 se una verifica fallisce.
+# Le partite di riferimento, i loro id scritti qui sotto, il registro e il log li legge dalla radice
+# dello stato di chi lancia (ANTFARM_STATE_DIR): il collaudo passa solo dove quello stato esiste.
+#
+#   ANTFARM_STATE_DIR=<progetto> orchestra/test/collaudo-harness.sh
+#
+# Esce 1 se una verifica fallisce, 2 senza ANTFARM_STATE_DIR.
 set -uo pipefail
 
 ORCHESTRA=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
-P="$ORCHESTRA/registro/partite.tsv"
-M="$ORCHESTRA/registro/messaggi.jsonl"
+if [[ -z ${ANTFARM_STATE_DIR:-} ]]; then
+  echo "ANTFARM_STATE_DIR non è impostata: il collaudo rigioca le partite di riferimento dalla radice dello stato di un progetto" >&2
+  exit 2
+fi
+STATO=$(cd "$ANTFARM_STATE_DIR" && pwd) || exit 2
+export ANTFARM_STATE_DIR="$STATO"
+P="$STATO/registro/partite.tsv"
+M="$STATO/registro/messaggi.jsonl"
 PARTITE_T42=(
   2026-10-26-120840-contro-prova-bus
   2026-10-26-121310-telefono-a-secco
@@ -94,7 +106,7 @@ for partita in "${PARTITE_T42[@]}"; do
   verifica "un evento messaggio per ogni riga della partita in \$M, stessi indici" \
     uguali "$(jq -c sort <<< "$INDICI_RICEVUTI")" "$RIGHE_ATTESE"
   verifica "messaggi in ordine di ts" jq -e '.messaggi_in_ordine_di_ts' <<< "$RIEPILOGO"
-  LANCIATI_ATTESI=$(jq -c '[.nodi | to_entries[] | select(.value.lanciato) | .key] | sort' "$ORCHESTRA/partite/$partita/nodi.json")
+  LANCIATI_ATTESI=$(jq -c '[.nodi | to_entries[] | select(.value.lanciato) | .key] | sort' "$STATO/partite/$partita/nodi.json")
   LANCIATI_RICEVUTI=$(jq -c '[.nodi_lanciati[][1]] | sort' <<< "$RIEPILOGO")
   verifica "un evento di lancio per ogni nodo lanciato di nodi.json: $LANCIATI_ATTESI" \
     uguali "$LANCIATI_RICEVUTI" "$LANCIATI_ATTESI"
@@ -128,7 +140,7 @@ verifica "ogni nodo-chiuso porta tante azioni quante ne conta azioni_fuori_bus" 
   jq -se '[.[] | select(.tipo == "nodo-chiuso")] | length == 4 and all(.riga as $voce | ($voce.azioni | type) == "array" and ($voce.azioni | length) == $voce.azioni_fuori_bus)' "$EVENTI_AZIONI"
 verifica "l'elenco dell'evento è quello di nodi.json, intatto" \
   uguali "$(jq -sc '[.[] | select(.tipo == "nodo-chiuso") | {(.nodo): .riga.azioni}] | add' "$EVENTI_AZIONI")" \
-  "$(jq -c '[.nodi | to_entries[] | select(.value.chiuso) | {(.key): .value.azioni}] | add' "$ORCHESTRA/partite/$PARTITA_AZIONI/nodi.json")"
+  "$(jq -c '[.nodi | to_entries[] | select(.value.chiuso) | {(.key): .value.azioni}] | add' "$STATO/partite/$PARTITA_AZIONI/nodi.json")"
 verifica "l'harness non nomina i transcript" uguali "$(grep -c '.claude/projects' "$ORCHESTRA/bin/harness.py")" 0
 
 grafo_cambiato_in_ordine() { # <file degli eventi>: grafo-cambiato prima del lancio di D e del primo messaggio con v2
@@ -151,7 +163,7 @@ verifica "il delta: entra D, sparisce C → A, nascono C → D, D → A, D → r
   jq -se '[.[] | select(.tipo == "grafo-cambiato")][0].delta | .versione == 2 and ([.nodi_aggiunti[].id] == ["D"]) and (.nodi_tolti == [])
     and ([.archi_tolti[] | [.da, .a]] == [["C","A"]]) and ([.archi_aggiunti[] | [.da, .a]] | sort == [["C","D"],["D","A"],["D","regia"]])' "$EVENTI_CADAVERE"
 verifica "la riga è grafi/v2.json intatto, e il ts è l'ora di entrata in vigore" \
-  bash -c "test \"\$(jq -cS 'select(.tipo == \"grafo-cambiato\") | .riga' '$EVENTI_CADAVERE')\" = \"\$(jq -cS . '$ORCHESTRA/partite/$PARTITA_CADAVERE/grafi/v2.json')\" && jq -se '[.[] | select(.tipo == \"grafo-cambiato\")][0] | .ts == .riga.in_vigore' '$EVENTI_CADAVERE'"
+  bash -c "test \"\$(jq -cS 'select(.tipo == \"grafo-cambiato\") | .riga' '$EVENTI_CADAVERE')\" = \"\$(jq -cS . '$STATO/partite/$PARTITA_CADAVERE/grafi/v2.json')\" && jq -se '[.[] | select(.tipo == \"grafo-cambiato\")][0] | .ts == .riga.in_vigore' '$EVENTI_CADAVERE'"
 verifica "grafo-cambiato prima del lancio di D e del primo messaggio con v2" grafo_cambiato_in_ordine "$EVENTI_CADAVERE"
 
 echo "sola lettura: impronte dopo i replay"
@@ -160,7 +172,9 @@ verifica "sha256 di \$P e \$M uguale prima e dopo" uguali "$IMPRONTA_PRIMA" "$IM
 
 echo "dal vivo, partita a secco su una copia del motore"
 COPIA="$TMP/motore"
-mkdir -p "$COPIA"
+STATO_COPIA="$TMP/stato"
+mkdir -p "$COPIA" "$STATO_COPIA"
+export ANTFARM_STATE_DIR="$STATO_COPIA"
 cp -r "$ORCHESTRA/bin" "$ORCHESTRA/giochi" "$ORCHESTRA/schema" "$COPIA/"
 [[ -d "$ORCHESTRA/vista" ]] && cp -r "$ORCHESTRA/vista" "$COPIA/"
 accendi "$TMP/harness-vivo.out" "$COPIA/bin/harness.py" vivo
@@ -174,7 +188,7 @@ verifica "il client si ferma su partita-chiusa" test $? -eq 0
 spegni
 sed 's/^/  /' "$TMP/harness-vivo.out.err"
 PARTITA_VIVO=$(jq -r 'select(.tipo == "partita-aperta") | .partita' "$TMP/vivo.jsonl")
-RIGHE_VIVO=$(jq -c --arg p "$PARTITA_VIVO" 'select(.partita == $p) | input_line_number' "$COPIA/registro/messaggi.jsonl" | jq -sc .)
+RIGHE_VIVO=$(jq -c --arg p "$PARTITA_VIVO" 'select(.partita == $p) | input_line_number' "$STATO_COPIA/registro/messaggi.jsonl" | jq -sc .)
 INDICI_VIVO=$(jq -c '[.indici_messaggi[][1]] | sort' "$TMP/vivo-riepilogo.json")
 printf '  partita %s · righe in $M: %s · eventi messaggio: %s\n' "$PARTITA_VIVO" \
   "$(jq length <<< "$RIGHE_VIVO")" "$(jq length <<< "$INDICI_VIVO")"
