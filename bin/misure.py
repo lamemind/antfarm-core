@@ -49,8 +49,10 @@ def righe_log(percorso_log, id_partita):
 
 
 def percorsi_dal_progetto(percorso_registro, percorso_log):
-    """Registro e log come path dalla root del progetto, per citarli nel rapporto."""
-    radice_progetto = Path(percorso_registro).resolve().parents[2]
+    """Registro e log come path dalla radice dello stato del progetto, per citarli nel rapporto:
+    `registro/partite.tsv` e `registro/messaggi.jsonl`, mai il path della macchina. La radice è la
+    cartella sopra `registro/`."""
+    radice_progetto = Path(percorso_registro).resolve().parents[1]
     return (Path(percorso_registro).resolve().relative_to(radice_progetto),
             Path(percorso_log).resolve().relative_to(radice_progetto))
 

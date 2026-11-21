@@ -133,14 +133,14 @@ import partita as libpartita  # noqa: E402
 import rapporto as telefono_rapporto  # noqa: E402
 import vista as libvista  # noqa: E402
 
-RADICE = libgrafo.radice_orchestra()
-VALIDATORE = RADICE / "bin" / "valida-grafo.py"
-LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
-GRAFO_TELEFONO = RADICE / "giochi" / "telefono" / "grafo.json"
-NODO_INOLTRO = RADICE / "giochi" / "telefono" / "nodo-inoltro.py"
-NODO_SCAMBIO = RADICE / "giochi" / "leavitt" / "nodo-scambio.py"
-NODO_COPIONE = RADICE / "giochi" / "bottone" / "nodo-copione.py"
-NODO_RIGA = RADICE / "giochi" / "cadavere" / "nodo-riga.py"
+RADICE_CODICE = libgrafo.radice_codice()
+VALIDATORE = RADICE_CODICE / "bin" / "valida-grafo.py"
+LOG_MESSAGGI = libpartita.RADICE_STATO / "registro" / "messaggi.jsonl"
+GRAFO_TELEFONO = RADICE_CODICE / "giochi" / "telefono" / "grafo.json"
+NODO_INOLTRO = RADICE_CODICE / "giochi" / "telefono" / "nodo-inoltro.py"
+NODO_SCAMBIO = RADICE_CODICE / "giochi" / "leavitt" / "nodo-scambio.py"
+NODO_COPIONE = RADICE_CODICE / "giochi" / "bottone" / "nodo-copione.py"
+NODO_RIGA = RADICE_CODICE / "giochi" / "cadavere" / "nodo-riga.py"
 SCADENZA_NODO_S = 600
 SCADENZA_PARTITA_S = 1800
 SCADENZA_CHIUSURA_NODI_S = 300
@@ -231,7 +231,7 @@ def contro_prova(argomenti):
     return 0 if passate else 1
 
 
-GRAFO_CONTRO_PROVA_SORGENTE = RADICE / "test" / "grafi" / "sorgente.json"
+GRAFO_CONTRO_PROVA_SORGENTE = RADICE_CODICE / "test" / "grafi" / "sorgente.json"
 
 PROMPT_CONTRO_PROVA_SORGENTE_B = """Sei il nodo B di una partita di prova del motore orchestra. Collaudi i permessi: alcuni passi qui sotto devono essere rifiutati, ed è il risultato atteso. Esegui ogni comando esattamente come è scritto, un comando per chiamata, senza modificarlo e senza aggiungere altro.
 

@@ -80,10 +80,6 @@ def delta(prima, dopo):
     }
 
 
-def radice_orchestra():
-    return Path(__file__).resolve().parent.parent
-
-
 def radice_codice():
     """La cartella del motore, ricavata dal path di questo file: `bin/`, `giochi/`, `schema/`, `vista/`."""
     return Path(__file__).resolve().parent.parent

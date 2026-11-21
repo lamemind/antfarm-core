@@ -26,11 +26,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import grafo as libgrafo  # noqa: E402
 import partita as libpartita  # noqa: E402
 
 CAMPI_USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-REGISTRO_PARTITE = libgrafo.radice_orchestra() / "registro" / "partite.tsv"
+REGISTRO_PARTITE = libpartita.RADICE_STATO / "registro" / "partite.tsv"
 COLONNE_REGISTRO = ("partita", "gioco", "esito", "turni_umani", "token", "cwd")
 
 

@@ -21,8 +21,10 @@ Ogni invio, consegnato o rifiutato, ogni scrittura e ogni lettura diventano una 
 registro/messaggi.jsonl; la scrittura ha esito `scritto`. Motivi di rifiuto: `arco-negato`,
 `nodo-ignoto`, `mittente-ignoto`, `tipo-errato`.
 
-Esce 0 se consegna, scrive o legge, 1 se rifiuta, 2 su uso sbagliato, 3 se recv non riceve
-niente entro l'attesa.
+Partite e log stanno sotto la radice dello stato, che il bus legge solo da ANTFARM_STATE_DIR.
+
+Esce 0 se consegna, scrive o legge, 1 se rifiuta, 2 su uso sbagliato o senza radice dello stato,
+3 se recv non riceve niente entro l'attesa.
 """
 
 import fcntl
@@ -38,10 +40,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grafo as libgrafo  # noqa: E402
 import vista as libvista  # noqa: E402
 
-RADICE = libgrafo.radice_orchestra()
-PARTITE = RADICE / "partite"
-LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
-LOCK_MESSAGGI = RADICE / "registro" / ".messaggi.lock"
+# La radice dello stato arriva solo dall'ambiente, mai da un argomento: `Bash(<bus> *)` ammette
+# qualunque argomento, quindi il nodo potrebbe scriverlo. La regia la mette in ANTFARM_STATE_DIR
+# in path assoluto; senza, il bus esce con errore.
+RADICE_STATO = libgrafo.radice_stato()
+PARTITE = RADICE_STATO / "partite"
+LOG_MESSAGGI = RADICE_STATO / "registro" / "messaggi.jsonl"
+LOCK_MESSAGGI = RADICE_STATO / "registro" / ".messaggi.lock"
 ATTESA_REGISTRAZIONE_S = 20
 ATTESA_RECV_DEFAULT_S = 600
 ATTESA_RECV_MASSIMA_S = 840

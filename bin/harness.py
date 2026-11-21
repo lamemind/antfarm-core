@@ -31,6 +31,7 @@ della versione nuova e, in cima, il delta rispetto alla precedente. Le righe del
 Una porta sola, legata a 127.0.0.1: `/` serve la vista, `/canale.json` il modo e la velocità,
 `/eventi` il WebSocket. Il WebSocket rifiuta le pagine d'altra origine, perché il log porta il
 testo integrale dei messaggi. L'harness non scrive in registro/ né in partite/: legge soltanto.
+Li legge dalla radice dello stato, ANTFARM_STATE_DIR, e ogni modo la vuole.
 
 Porta di default 8740; --porta 0 la fa scegliere al sistema. La prima riga su stdout porta
 l'indirizzo. Si ferma con SIGINT o SIGTERM.
@@ -51,10 +52,10 @@ from websockets.exceptions import ConnectionClosed
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grafo as libgrafo  # noqa: E402
 
-RADICE = libgrafo.radice_orchestra()
-PARTITE = RADICE / "partite"
-LOG_MESSAGGI = RADICE / "registro" / "messaggi.jsonl"
-CARTELLA_VISTA = RADICE / "vista"
+RADICE_STATO = libgrafo.radice_stato()
+PARTITE = RADICE_STATO / "partite"
+LOG_MESSAGGI = RADICE_STATO / "registro" / "messaggi.jsonl"
+CARTELLA_VISTA = libgrafo.radice_codice() / "vista"
 INDIRIZZO = "127.0.0.1"
 PORTA_DEFAULT = 8740
 PASSO_DIRETTA_S = 0.1

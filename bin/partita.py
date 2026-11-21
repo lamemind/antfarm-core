@@ -15,6 +15,9 @@ Il grafo di una partita può cambiare a partita aperta, e solo la regia lo scriv
 la versione corrente, quella che il bus rilegge a ogni comando; `grafi/v<N>.json` conserva ogni
 versione, la prima compresa, con l'ora in cui è entrata in vigore. Una versione nuova entra solo
 se porta il numero corrente + 1 e `valida-grafo.py` esce 0: altrimenti niente cambia.
+
+Le partite nascono sotto `partite/` della radice dello stato, letta da ANTFARM_STATE_DIR una volta
+sola all'import e passata ai figli in path assoluto.
 """
 
 import fcntl
@@ -31,10 +34,15 @@ from pathlib import Path
 
 import grafo as libgrafo
 
-RADICE = libgrafo.radice_orchestra()
-PARTITE = RADICE / "partite"
-BUS = RADICE / "bin" / "bus"
-VALIDATORE_GRAFO = RADICE / "bin" / "valida-grafo.py"
+RADICE_CODICE = libgrafo.radice_codice()
+RADICE_STATO = libgrafo.radice_stato()
+# I figli della regia ereditano la radice dello stato in path assoluto: i comandi del bus della
+# regia e i nodi script dall'ambiente, i nodi LLM dal blocco `env` di --settings. Una radice
+# relativa, letta dalla cartella di lavoro di un nodo, punterebbe dentro la partita.
+os.environ[libgrafo.VARIABILE_STATO] = str(RADICE_STATO)
+PARTITE = RADICE_STATO / "partite"
+BUS = RADICE_CODICE / "bin" / "bus"
+VALIDATORE_GRAFO = RADICE_CODICE / "bin" / "valida-grafo.py"
 PROGETTI_CLAUDE = Path.home() / ".claude" / "projects"
 TIMEOUT_BASH_MS = 900000
 VARIABILI_DA_NON_PASSARE = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
@@ -245,6 +253,7 @@ class Partita:
             "--settings", json.dumps({"env": {
                 "BASH_DEFAULT_TIMEOUT_MS": str(TIMEOUT_BASH_MS),
                 "BASH_MAX_TIMEOUT_MS": str(TIMEOUT_BASH_MS),
+                libgrafo.VARIABILE_STATO: str(RADICE_STATO),
             }}),
         ]
         if modello:
