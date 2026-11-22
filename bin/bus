@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Bus dei messaggi: l'unico pezzo del motore che fa rispettare il grafo di accesso.
+"""Message bus: the only piece of the engine that enforces the access graph.
 
-    bus send <destinatario> [testo...]   consegna un messaggio; senza testo lo legge da stdin
-    bus recv [--attesa <secondi>]        aspetta bloccato il primo messaggio della propria casella
-    bus scrivi <sorgente> [testo...]     scrive il testo nel file della sorgente, sostituendone il
-                                         contenuto; senza testo lo legge da stdin
-    bus vista                            stampa la propria vista del grafo, con la versione corrente
+    bus send <recipient> [text...]       delivers a message; without text it reads it from stdin
+    bus recv [--wait <seconds>]          waits, blocked, for the first message of its own mailbox
+    bus write <source> [text...]         writes the text into the file of the source, replacing its
+                                         content; without text it reads it from stdin
+    bus view                             prints its own view of the graph, with the current version
 
-Nessun comando accetta il mittente. Il bus lo ricava dalla discendenza dei processi: risale
-/proc dal proprio padre e il primo antenato che una partita aperta ha registrato in nodi.json
-— coppia (pid, starttime), scritta dalla regia al lancio — è il chiamante. Un chiamante che
-nessuna partita aperta ha registrato viene rifiutato con `mittente-ignoto`.
+No command accepts the sender. The bus derives it from the process ancestry: it walks up
+/proc from its own parent, and the first ancestor that an open match has registered in nodes.json
+— pair (pid, starttime), written by the director at launch — is the caller. A caller that
+no open match has registered is rejected with `unknown-sender`.
 
-Una sorgente è un nodo che non parla: un file, al `percorso` che il grafo dichiara relativo alla
-cartella della partita. Il diritto di scriverla è un arco `scrive` verso di lei, come per un
-messaggio: `scrivi` lo controlla allo stesso modo di `send`. `send` verso una sorgente e `scrivi`
-verso un nodo che non è una sorgente sono rifiutati con `tipo-errato`.
+A source is a node that does not speak: a file, at the `path` that the graph declares relative to the
+match directory. The right to write it is a `write` edge toward it, as for a
+message: `write` checks it the same way as `send`. `send` toward a source and `write`
+toward a node that is not a source are rejected with `wrong-type`.
 
-Ogni invio, consegnato o rifiutato, ogni scrittura e ogni lettura diventano una riga di
-registro/messaggi.jsonl; la scrittura ha esito `scritto`. Motivi di rifiuto: `arco-negato`,
-`nodo-ignoto`, `mittente-ignoto`, `tipo-errato`.
+Every send, delivered or rejected, every write and every receipt becomes a row of
+registry/messages.jsonl; the write has outcome `written`. Rejection reasons: `edge-denied`,
+`unknown-node`, `unknown-sender`, `wrong-type`.
 
-Partite e log stanno sotto la radice dello stato, che il bus legge solo da ANTFARM_STATE_DIR.
+Matches and log live under the state root, which the bus reads only from ANTFARM_STATE_DIR.
 
-Esce 0 se consegna, scrive o legge, 1 se rifiuta, 2 su uso sbagliato o senza radice dello stato,
-3 se recv non riceve niente entro l'attesa.
+Exits 0 if it delivers, writes or receives, 1 if it rejects, 2 on wrong usage or without a state root,
+3 if recv receives nothing within the wait.
 """
 
 import fcntl
@@ -37,315 +37,315 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import grafo as libgrafo  # noqa: E402
-import vista as libvista  # noqa: E402
+import graph as libgraph  # noqa: E402
+import view as libview  # noqa: E402
 
-# La radice dello stato arriva solo dall'ambiente, mai da un argomento: `Bash(<bus> *)` ammette
-# qualunque argomento, quindi il nodo potrebbe scriverlo. La regia la mette in ANTFARM_STATE_DIR
-# in path assoluto; senza, il bus esce con errore.
-RADICE_STATO = libgrafo.radice_stato()
-PARTITE = RADICE_STATO / "partite"
-LOG_MESSAGGI = RADICE_STATO / "registro" / "messaggi.jsonl"
-LOCK_MESSAGGI = RADICE_STATO / "registro" / ".messaggi.lock"
-ATTESA_REGISTRAZIONE_S = 20
-ATTESA_RECV_DEFAULT_S = 600
-ATTESA_RECV_MASSIMA_S = 840
-PASSO_POLLING_S = 0.5
-
-
-class Rifiuto(Exception):
-    def __init__(self, motivo, dettaglio):
-        super().__init__(dettaglio)
-        self.motivo = motivo
-        self.dettaglio = dettaglio
+# The state root comes only from the environment, never from an argument: `Bash(<bus> *)` allows
+# any argument, so the node could write it. The director puts it in ANTFARM_STATE_DIR
+# as an absolute path; without it, the bus exits with an error.
+STATE_ROOT = libgraph.state_root()
+MATCHES = STATE_ROOT / "matches"
+MESSAGE_LOG = STATE_ROOT / "registry" / "messages.jsonl"
+MESSAGES_LOCK = STATE_ROOT / "registry" / ".messages.lock"
+REGISTRATION_WAIT_S = 20
+RECV_WAIT_DEFAULT_S = 600
+RECV_WAIT_MAX_S = 840
+POLLING_STEP_S = 0.5
 
 
-# <editor-fold defaultstate="collapsed" desc="Identità dalla discendenza dei processi">
-def campi_stat(pid):
-    """I campi di /proc/<pid>/stat dal terzo in poi: il nome del comando può contenere spazi e parentesi."""
-    with open(f"/proc/{pid}/stat", encoding="utf-8") as file_stat:
-        contenuto = file_stat.read()
-    return contenuto[contenuto.rindex(")") + 2:].split()
+class Rejection(Exception):
+    def __init__(self, reason, detail):
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
 
 
-def padre_e_avvio(pid):
-    campi = campi_stat(pid)
-    return int(campi[1]), int(campi[19])
+# <editor-fold defaultstate="collapsed" desc="Identity from the process ancestry">
+def stat_fields(pid):
+    """The fields of /proc/<pid>/stat from the third onward: the command name can contain spaces and parentheses."""
+    with open(f"/proc/{pid}/stat", encoding="utf-8") as stat_file:
+        content = stat_file.read()
+    return content[content.rindex(")") + 2:].split()
 
 
-def antenati():
-    """Coppie (pid, starttime) dal padre del bus fino a init, escluso."""
-    catena = []
+def parent_and_start_time(pid):
+    fields = stat_fields(pid)
+    return int(fields[1]), int(fields[19])
+
+
+def ancestors():
+    """Pairs (pid, starttime) from the parent of the bus up to init, excluded."""
+    chain = []
     pid = os.getppid()
     while pid > 1:
         try:
-            padre, avvio = padre_e_avvio(pid)
+            parent_pid, start_time = parent_and_start_time(pid)
         except (FileNotFoundError, ProcessLookupError):
             break
-        catena.append((pid, avvio))
-        pid = padre
-    return catena
+        chain.append((pid, start_time))
+        pid = parent_pid
+    return chain
 
 
-def e_sessione_claude(pid):
+def is_claude_session(pid):
     try:
-        eseguibile = os.readlink(f"/proc/{pid}/exe")
+        executable = os.readlink(f"/proc/{pid}/exe")
     except OSError:
         return False
-    return "/claude/" in eseguibile or Path(eseguibile).name == "claude"
+    return "/claude/" in executable or Path(executable).name == "claude"
 
 
-def registrazioni_aperte():
-    """(pid, starttime) → (cartella della partita, nodo), per ogni partita aperta."""
-    registrazioni = {}
-    if not PARTITE.is_dir():
-        return registrazioni
-    for file_nodi in PARTITE.glob("*/nodi.json"):
+def open_registrations():
+    """(pid, starttime) → (match directory, node), for every open match."""
+    registrations = {}
+    if not MATCHES.is_dir():
+        return registrations
+    for nodes_file in MATCHES.glob("*/nodes.json"):
         try:
-            dati = json.loads(file_nodi.read_text(encoding="utf-8"))
+            data = json.loads(nodes_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if dati.get("stato") != "aperta":
+        if data.get("status") != "open":
             continue
-        for id_nodo, processo in dati.get("nodi", {}).items():
-            if processo.get("pid") and processo.get("starttime"):
-                registrazioni[(processo["pid"], processo["starttime"])] = (file_nodi.parent, id_nodo)
-    return registrazioni
+        for node_id, process in data.get("nodes", {}).items():
+            if process.get("pid") and process.get("starttime"):
+                registrations[(process["pid"], process["starttime"])] = (nodes_file.parent, node_id)
+    return registrations
 
 
-def identifica():
-    """Il chiamante come (cartella della partita, nodo). Aspetta la registrazione fino a 20 s,
-    perché la regia registra un nodo solo dopo che il suo processo è partito."""
-    catena = antenati()
-    scadenza = time.monotonic() + ATTESA_REGISTRAZIONE_S
+def identify():
+    """The caller as (match directory, node). Waits for the registration up to 20 s,
+    because the director registers a node only after its process has started."""
+    chain = ancestors()
+    timeout = time.monotonic() + REGISTRATION_WAIT_S
     while True:
-        registrazioni = registrazioni_aperte()
-        for coppia in catena:
-            if coppia in registrazioni:
-                return registrazioni[coppia]
-        if time.monotonic() >= scadenza:
+        registrations = open_registrations()
+        for pair in chain:
+            if pair in registrations:
+                return registrations[pair]
+        if time.monotonic() >= timeout:
             break
-        time.sleep(PASSO_POLLING_S)
-    sessioni = [pid for pid, _ in catena if e_sessione_claude(pid)]
-    chi = f"sessione claude pid {sessioni[0]}" if sessioni else f"processo pid {os.getppid()}"
-    raise Rifiuto("mittente-ignoto", f"{chi} non è registrata in nessuna partita aperta")
+        time.sleep(POLLING_STEP_S)
+    sessions = [pid for pid, _ in chain if is_claude_session(pid)]
+    who = f"sessione claude pid {sessions[0]}" if sessions else f"processo pid {os.getppid()}"
+    raise Rejection("unknown-sender", f"{who} non è registrata in nessuna partita aperta")
 # </editor-fold>
 
 
-# <editor-fold defaultstate="collapsed" desc="Log dei messaggi e caselle">
-def adesso():
+# <editor-fold defaultstate="collapsed" desc="Message log and mailboxes">
+def now():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
 
 
-def scrivi_log(riga):
-    LOG_MESSAGGI.parent.mkdir(parents=True, exist_ok=True)
-    with open(LOCK_MESSAGGI, "a", encoding="utf-8") as lock:
+def write_log(row):
+    MESSAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(MESSAGES_LOCK, "a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        with open(LOG_MESSAGGI, "a", encoding="utf-8") as log:
-            log.write(json.dumps(riga, ensure_ascii=False) + "\n")
+        with open(MESSAGE_LOG, "a", encoding="utf-8") as log:
+            log.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def casella(cartella_partita, id_nodo):
-    return cartella_partita / "caselle" / id_nodo
+def mailbox(match_dir, node_id):
+    return match_dir / "mailboxes" / node_id
 
 
-def deposita(cartella_partita, messaggio):
-    cartella = casella(cartella_partita, messaggio["a"])
-    cartella.mkdir(parents=True, exist_ok=True)
-    nome = f"{time.time_ns()}-{messaggio['id']}.json"
-    temporaneo = cartella / f".{nome}"
-    temporaneo.write_text(json.dumps(messaggio, ensure_ascii=False), encoding="utf-8")
-    os.rename(temporaneo, cartella / nome)
+def deposit(match_dir, message):
+    directory = mailbox(match_dir, message["to"])
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{time.time_ns()}-{message['id']}.json"
+    temporary = directory / f".{name}"
+    temporary.write_text(json.dumps(message, ensure_ascii=False), encoding="utf-8")
+    os.rename(temporary, directory / name)
 
 
-def preleva(cartella_partita, id_nodo):
-    """Il messaggio più vecchio della casella, spostato in letti/; None se la casella è vuota."""
-    cartella = casella(cartella_partita, id_nodo)
-    letti = cartella / "letti"
-    letti.mkdir(parents=True, exist_ok=True)
-    for file_messaggio in sorted(cartella.glob("[0-9]*.json")):
+def take(match_dir, node_id):
+    """The oldest message of the mailbox, moved to received/; None if the mailbox is empty."""
+    directory = mailbox(match_dir, node_id)
+    received = directory / "received"
+    received.mkdir(parents=True, exist_ok=True)
+    for message_file in sorted(directory.glob("[0-9]*.json")):
         try:
-            os.rename(file_messaggio, letti / file_messaggio.name)
+            os.rename(message_file, received / message_file.name)
         except FileNotFoundError:
             continue
-        return json.loads((letti / file_messaggio.name).read_text(encoding="utf-8"))
+        return json.loads((received / message_file.name).read_text(encoding="utf-8"))
     return None
 # </editor-fold>
 
 
-def riga_rifiuto(rifiuto, partita, mittente, destinatario, versione, testo):
+def rejection_row(rejection, match, sender, recipient, version, text):
     return {
-        "ts": adesso(), "partita": partita, "id": None, "esito": "rifiutato", "motivo": rifiuto.motivo,
-        "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
-        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+        "ts": now(), "match": match, "id": None, "outcome": "rejected", "reason": rejection.reason,
+        "from": sender, "to": recipient, "version": version, "text": text,
+        "words": len(text.split()), "caller_pid": os.getppid(),
     }
 
 
-def testo_dagli_argomenti(argomenti):
-    testo = " ".join(argomenti[1:]) if len(argomenti) > 1 else sys.stdin.read()
-    return testo.strip()
+def text_from_args(args):
+    text = " ".join(args[1:]) if len(args) > 1 else sys.stdin.read()
+    return text.strip()
 
 
-def autorizza(destinatario, verso_sorgente):
-    """Identifica il chiamante e controlla nodo, tipo e arco `scrive` verso il destinatario.
-    Restituisce (cartella della partita, mittente, grafo, ora di partenza); solleva Rifiuto con
-    partita, mittente e versione già noti nei suoi attributi, per la riga del log.
+def authorize(recipient, to_source):
+    """Identifies the caller and checks node, type and `write` edge toward the recipient.
+    Returns (match directory, sender, graph, departure time); raises Rejection with
+    match, sender and version already known in its attributes, for the log row.
 
-    Il grafo si rilegge a ogni comando, quindi una versione scritta dalla regia a partita aperta
-    vale dal comando successivo. Versione e ora di partenza si leggono sotto il lock condiviso:
-    la regia scrive l'ora di entrata in vigore sotto il lock esclusivo, e così un messaggio
-    partito prima del cambio ha sempre un'ora precedente e la versione vecchia."""
-    cartella_partita, mittente = identifica()
-    with open(cartella_partita / libgrafo.LOCK_GRAFO, "a", encoding="utf-8") as lock:
+    The graph is reread on every command, so a version that the director writes while the match is open
+    holds from the next command. Version and departure time are read under the shared lock:
+    the director writes the time the version takes effect under the exclusive lock, and so a message
+    that departed before the change always has an earlier time and the old version."""
+    match_dir, sender = identify()
+    with open(match_dir / libgraph.GRAPH_LOCK, "a", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)
-        grafo = libgrafo.carica(cartella_partita / "grafo.json")
-        partenza = adesso()
-    versione = grafo["versione"]
-    contesto = {"partita": cartella_partita.name, "mittente": mittente, "versione": versione}
-    nodo_destinatario = libgrafo.nodo(grafo, destinatario)
+        graph = libgraph.load(match_dir / "graph.json")
+        departure = now()
+    version = graph["version"]
+    context = {"match": match_dir.name, "sender": sender, "version": version}
+    recipient_node = libgraph.node(graph, recipient)
     try:
-        if nodo_destinatario is None:
-            raise Rifiuto("nodo-ignoto", f"{destinatario} non è un nodo del grafo v{versione}")
-        e_sorgente = nodo_destinatario["tipo"] == "sorgente"
-        if verso_sorgente and not e_sorgente:
-            raise Rifiuto("tipo-errato", f"{destinatario} non è una sorgente: a un nodo si scrive con `bus send`")
-        if e_sorgente and not verso_sorgente:
-            raise Rifiuto("tipo-errato", f"{destinatario} è una sorgente, un file e non una casella: si scrive con `bus scrivi`")
-        if "scrive" not in libgrafo.diritti(grafo, mittente, destinatario):
-            raise Rifiuto("arco-negato", f"{mittente} non ha `scrive` verso {destinatario} nel grafo v{versione}")
-    except Rifiuto as rifiuto:
-        rifiuto.contesto = contesto
+        if recipient_node is None:
+            raise Rejection("unknown-node", f"{recipient} non è un nodo del grafo v{version}")
+        is_source = recipient_node["type"] == "source"
+        if to_source and not is_source:
+            raise Rejection("wrong-type", f"{recipient} non è una sorgente: a un nodo si scrive con `bus send`")
+        if is_source and not to_source:
+            raise Rejection("wrong-type", f"{recipient} è una sorgente, un file e non una casella: si scrive con `bus write`")
+        if "write" not in libgraph.rights(graph, sender, recipient):
+            raise Rejection("edge-denied", f"{sender} non ha `write` verso {recipient} nel grafo v{version}")
+    except Rejection as rejection:
+        rejection.context = context
         raise
-    return cartella_partita, mittente, grafo, partenza
+    return match_dir, sender, graph, departure
 
 
-def rifiuta(rifiuto, destinatario, testo):
-    contesto = getattr(rifiuto, "contesto", {"partita": None, "mittente": None, "versione": None})
-    scrivi_log(riga_rifiuto(rifiuto, contesto["partita"], contesto["mittente"], destinatario, contesto["versione"], testo))
-    print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+def reject(rejection, recipient, text):
+    context = getattr(rejection, "context", {"match": None, "sender": None, "version": None})
+    write_log(rejection_row(rejection, context["match"], context["sender"], recipient, context["version"], text))
+    print(f"rifiutato: {rejection.reason} — {rejection.detail}", file=sys.stderr)
     return 1
 
 
-def comando_send(argomenti):
-    if not argomenti:
+def command_send(args):
+    if not args:
         print("uso: bus send <destinatario> [testo...]", file=sys.stderr)
         return 2
-    destinatario = argomenti[0]
-    testo = testo_dagli_argomenti(argomenti)
-    if not testo:
+    recipient = args[0]
+    text = text_from_args(args)
+    if not text:
         print("testo vuoto: niente da consegnare", file=sys.stderr)
         return 2
     try:
-        cartella_partita, mittente, grafo, partenza = autorizza(destinatario, verso_sorgente=False)
-    except Rifiuto as rifiuto:
-        return rifiuta(rifiuto, destinatario, testo)
-    partita, versione = cartella_partita.name, grafo["versione"]
-    messaggio = {
-        "ts": partenza, "partita": partita, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "consegnato",
-        "motivo": None, "da": mittente, "a": destinatario, "versione": versione, "testo": testo,
-        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+        match_dir, sender, graph, departure = authorize(recipient, to_source=False)
+    except Rejection as rejection:
+        return reject(rejection, recipient, text)
+    match, version = match_dir.name, graph["version"]
+    message = {
+        "ts": departure, "match": match, "id": f"m-{uuid.uuid4().hex[:12]}", "outcome": "delivered",
+        "reason": None, "from": sender, "to": recipient, "version": version, "text": text,
+        "words": len(text.split()), "caller_pid": os.getppid(),
     }
-    deposita(cartella_partita, messaggio)
-    scrivi_log(messaggio)
-    print(f"consegnato a {destinatario} · messaggio {messaggio['id']} · grafo v{versione}")
+    deposit(match_dir, message)
+    write_log(message)
+    print(f"consegnato a {recipient} · messaggio {message['id']} · grafo v{version}")
     return 0
 
 
-def file_della_sorgente(cartella_partita, nodo_sorgente):
-    """Il file della sorgente, dentro la cartella della partita. Il validatore del grafo rifiuta
-    già un percorso assoluto o con `..`; il controllo qui copre un link simbolico che porti fuori."""
-    radice = cartella_partita.resolve()
-    percorso = (radice / nodo_sorgente["percorso"]).resolve()
-    if radice not in percorso.parents:
-        raise Rifiuto("tipo-errato", f"il percorso di {nodo_sorgente['id']} esce dalla cartella della partita")
-    return percorso
+def source_file_path(match_dir, source_node):
+    """The file of the source, inside the match directory. The graph validator already rejects
+    an absolute path or one with `..`; the check here covers a symbolic link that leads outside."""
+    root = match_dir.resolve()
+    path = (root / source_node["path"]).resolve()
+    if root not in path.parents:
+        raise Rejection("wrong-type", f"il percorso di {source_node['id']} esce dalla cartella della partita")
+    return path
 
 
-def comando_scrivi(argomenti):
-    if not argomenti:
-        print("uso: bus scrivi <sorgente> [testo...]", file=sys.stderr)
+def command_write(args):
+    if not args:
+        print("uso: bus write <sorgente> [testo...]", file=sys.stderr)
         return 2
-    sorgente = argomenti[0]
-    testo = testo_dagli_argomenti(argomenti)
-    if not testo:
+    source = args[0]
+    text = text_from_args(args)
+    if not text:
         print("testo vuoto: niente da scrivere", file=sys.stderr)
         return 2
     try:
-        cartella_partita, mittente, grafo, partenza = autorizza(sorgente, verso_sorgente=True)
+        match_dir, sender, graph, departure = authorize(source, to_source=True)
         try:
-            percorso = file_della_sorgente(cartella_partita, libgrafo.nodo(grafo, sorgente))
-        except Rifiuto as rifiuto:
-            rifiuto.contesto = {"partita": cartella_partita.name, "mittente": mittente, "versione": grafo["versione"]}
+            path = source_file_path(match_dir, libgraph.node(graph, source))
+        except Rejection as rejection:
+            rejection.context = {"match": match_dir.name, "sender": sender, "version": graph["version"]}
             raise
-    except Rifiuto as rifiuto:
-        return rifiuta(rifiuto, sorgente, testo)
-    percorso.parent.mkdir(parents=True, exist_ok=True)
-    temporaneo = percorso.with_name(f".{percorso.name}.{uuid.uuid4().hex[:8]}")
-    temporaneo.write_text(testo + "\n", encoding="utf-8")
-    os.replace(temporaneo, percorso)
-    riga = {
-        "ts": partenza, "partita": cartella_partita.name, "id": f"m-{uuid.uuid4().hex[:12]}", "esito": "scritto",
-        "motivo": None, "da": mittente, "a": sorgente, "versione": grafo["versione"], "testo": testo,
-        "parole": len(testo.split()), "pid_chiamante": os.getppid(),
+    except Rejection as rejection:
+        return reject(rejection, source, text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}")
+    temporary.write_text(text + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    row = {
+        "ts": departure, "match": match_dir.name, "id": f"m-{uuid.uuid4().hex[:12]}", "outcome": "written",
+        "reason": None, "from": sender, "to": source, "version": graph["version"], "text": text,
+        "words": len(text.split()), "caller_pid": os.getppid(),
     }
-    scrivi_log(riga)
-    print(f"scritto in {sorgente} · {riga['id']} · grafo v{grafo['versione']}")
+    write_log(row)
+    print(f"scritto in {source} · {row['id']} · grafo v{graph['version']}")
     return 0
 
 
-def comando_recv(argomenti):
-    attesa = ATTESA_RECV_DEFAULT_S
-    if argomenti[:1] == ["--attesa"] and len(argomenti) == 2 and argomenti[1].isdigit():
-        attesa = min(int(argomenti[1]), ATTESA_RECV_MASSIMA_S)
-    elif argomenti:
-        print("uso: bus recv [--attesa <secondi>]", file=sys.stderr)
+def command_recv(args):
+    wait = RECV_WAIT_DEFAULT_S
+    if args[:1] == ["--wait"] and len(args) == 2 and args[1].isdigit():
+        wait = min(int(args[1]), RECV_WAIT_MAX_S)
+    elif args:
+        print("uso: bus recv [--wait <secondi>]", file=sys.stderr)
         return 2
     try:
-        cartella_partita, destinatario = identifica()
-    except Rifiuto as rifiuto:
-        scrivi_log(riga_rifiuto(rifiuto, None, None, None, None, ""))
-        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+        match_dir, recipient = identify()
+    except Rejection as rejection:
+        write_log(rejection_row(rejection, None, None, None, None, ""))
+        print(f"rifiutato: {rejection.reason} — {rejection.detail}", file=sys.stderr)
         return 1
-    scadenza = time.monotonic() + attesa
+    timeout = time.monotonic() + wait
     while True:
-        messaggio = preleva(cartella_partita, destinatario)
-        if messaggio is not None:
+        message = take(match_dir, recipient)
+        if message is not None:
             break
-        if time.monotonic() >= scadenza:
-            print(f"nessun messaggio entro {attesa} s: richiama bus recv per continuare ad aspettare")
+        if time.monotonic() >= timeout:
+            print(f"nessun messaggio entro {wait} s: richiama bus recv per continuare ad aspettare")
             return 3
-        time.sleep(PASSO_POLLING_S)
-    scrivi_log({
-        "ts": adesso(), "partita": cartella_partita.name, "id": messaggio["id"], "esito": "letto",
-        "motivo": None, "da": messaggio["da"], "a": destinatario, "versione": messaggio["versione"],
-        "testo": None, "parole": messaggio["parole"], "pid_chiamante": os.getppid(),
+        time.sleep(POLLING_STEP_S)
+    write_log({
+        "ts": now(), "match": match_dir.name, "id": message["id"], "outcome": "received",
+        "reason": None, "from": message["from"], "to": recipient, "version": message["version"],
+        "text": None, "words": message["words"], "caller_pid": os.getppid(),
     })
-    print(f"messaggio {messaggio['id']} da {messaggio['da']} · grafo v{messaggio['versione']}")
+    print(f"messaggio {message['id']} da {message['from']} · grafo v{message['version']}")
     print("---")
-    print(messaggio["testo"])
+    print(message["text"])
     return 0
 
 
-def comando_vista(argomenti):
-    if argomenti:
-        print("uso: bus vista", file=sys.stderr)
+def command_view(args):
+    if args:
+        print("uso: bus view", file=sys.stderr)
         return 2
     try:
-        cartella_partita, id_nodo = identifica()
-    except Rifiuto as rifiuto:
-        print(f"rifiutato: {rifiuto.motivo} — {rifiuto.dettaglio}", file=sys.stderr)
+        match_dir, node_id = identify()
+    except Rejection as rejection:
+        print(f"rifiutato: {rejection.reason} — {rejection.detail}", file=sys.stderr)
         return 1
-    grafo = libgrafo.carica(cartella_partita / "grafo.json")
-    print(libvista.come_testo(libvista.vista(grafo, id_nodo)))
+    graph = libgraph.load(match_dir / "graph.json")
+    print(libview.as_text(libview.view(graph, node_id)))
     return 0
 
 
 def main():
-    comandi = {"send": comando_send, "recv": comando_recv, "scrivi": comando_scrivi, "vista": comando_vista}
-    if len(sys.argv) < 2 or sys.argv[1] not in comandi:
+    commands = {"send": command_send, "recv": command_recv, "write": command_write, "view": command_view}
+    if len(sys.argv) < 2 or sys.argv[1] not in commands:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    return comandi[sys.argv[1]](sys.argv[2:])
+    return commands[sys.argv[1]](sys.argv[2:])
 
 
 if __name__ == "__main__":

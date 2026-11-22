@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "description": "Negative test of the source: A and B write to each other, only A has `write` towards the source bottone, the file bottone/bottone.txt in the match folder.",
+  "nodes": [
+    {
+      "id": "director",
+      "type": "script",
+      "role": "opens and closes the negative test"
+    },
+    {
+      "id": "A",
+      "type": "llm",
+      "role": "the only one that writes bottone"
+    },
+    {
+      "id": "B",
+      "type": "llm",
+      "role": "without rights on bottone"
+    },
+    {
+      "id": "bottone",
+      "type": "source",
+      "role": "the file",
+      "path": "/tmp/bottone.txt"
+    }
+  ],
+  "edges": [
+    {
+      "from": "director",
+      "to": "A",
+      "rights": [
+        "know",
+        "write"
+      ]
+    },
+    {
+      "from": "director",
+      "to": "B",
+      "rights": [
+        "know",
+        "write"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "B",
+      "rights": [
+        "know",
+        "write"
+      ]
+    },
+    {
+      "from": "B",
+      "to": "A",
+      "rights": [
+        "know",
+        "write"
+      ]
+    },
+    {
+      "from": "A",
+      "to": "bottone",
+      "rights": [
+        "know",
+        "write"
+      ]
+    }
+  ]
+}

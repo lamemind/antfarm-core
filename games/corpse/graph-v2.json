@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "description": "Exquisite corpse, after the change: D enters between C and A, the edge C → A is gone.",
+  "nodes": [
+    {"id": "director", "type": "script", "role": "gives the first line, changes the graph, closes"},
+    {"id": "A", "type": "llm", "role": "writes a line"},
+    {"id": "B", "type": "llm", "role": "writes a line"},
+    {"id": "C", "type": "llm", "role": "writes a line"},
+    {"id": "D", "type": "llm", "role": "joins while the match is open"}
+  ],
+  "edges": [
+    {"from": "director", "to": "A", "rights": ["know", "write"]},
+    {"from": "director", "to": "C", "rights": ["know", "write"]},
+    {"from": "A", "to": "B", "rights": ["know", "write"]},
+    {"from": "B", "to": "C", "rights": ["know", "write"]},
+    {"from": "C", "to": "D", "rights": ["know", "write"]},
+    {"from": "D", "to": "A", "rights": ["know", "write"]},
+    {"from": "A", "to": "director", "rights": ["know", "write"]},
+    {"from": "B", "to": "director", "rights": ["know", "write"]},
+    {"from": "C", "to": "director", "rights": ["know", "write"]},
+    {"from": "D", "to": "director", "rights": ["know", "write"]}
+  ]
+}

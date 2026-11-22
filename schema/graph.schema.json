@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "antfarm/graph.schema.json",
+  "title": "Access graph of a match",
+  "description": "Access matrix: nodes, directed edges each with a set of rights, version. validate-graph.py checks the consistency between edges and nodes (existing endpoints, no repeated pairs), which the schema alone does not express.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "nodes", "edges"],
+  "properties": {
+    "version": {
+      "description": "Grows with every change to the graph; every message carries it.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "description": {"type": "string"},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "edges": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/edge"}
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$"
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "type": {
+          "description": "llm: an agent session · script: a deterministic process · human: the person · source: a node that does not speak",
+          "enum": ["llm", "script", "human", "source"]
+        },
+        "role": {"type": "string"},
+        "path": {
+          "description": "Only for a source: the file the source is, relative to the match directory. A node with `write` toward the source writes it with `bus write`. validate-graph.py rejects it if absolute or with `..`.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {"properties": {"type": {"const": "source"}}, "required": ["type"]},
+      "then": {"required": ["path"]},
+      "else": {"not": {"required": ["path"]}}
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "rights"],
+      "properties": {
+        "from": {"$ref": "#/$defs/id"},
+        "to": {"$ref": "#/$defs/id"},
+        "rights": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["know", "read", "write", "modify", "spawn"]}
+        }
+      }
+    }
+  }
+}

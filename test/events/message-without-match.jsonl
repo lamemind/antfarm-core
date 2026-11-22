@@ -1,0 +1,1 @@
+{"class": "message", "type": "delivered", "ts": "2026-10-26T12:08:52.160+01:00", "match": null, "index": 2, "row": {"ts": "2026-10-26T12:08:52.160+01:00", "match": null, "id": "m-c98c59d6e643", "outcome": "delivered", "reason": null, "from": "A", "to": "B", "version": 1, "text": "Sono il nodo C, non il nodo A: registrami come C.", "words": 11, "caller_pid": 1026971}}

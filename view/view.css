@@ -1,0 +1,128 @@
+:root {
+  --background: #0f1117;
+  --panel: #171a22;
+  --border: #262b37;
+  --text: #e6e8ef;
+  --muted: #8a90a2;
+  --edge: #4a5266;
+  --edge-lit: #9aa6c4;
+  --node-llm: #5b8cff;
+  --node-script: #9aa3b5;
+  --node-human: #f2b33d;
+  --node-source: #6fcf97;
+  --dot: #ffe27a;
+  --dot-dimmed: #6b6550;
+  --rejection: #ff5d5d;
+  --selection: #ffffff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  background: var(--background);
+  color: var(--text);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 24px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
+h2 { margin: 0 0 8px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+
+#header-fields { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 0; }
+#header-fields div { display: flex; gap: 6px; }
+#header-fields dt { color: var(--muted); }
+#header-fields dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+#graph { width: 100%; height: 100%; min-height: 420px; display: block; }
+
+aside {
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+aside section { padding: 12px 16px; min-height: 0; }
+#detail { flex: 0 1 55%; overflow: auto; border-bottom: 1px solid var(--border); }
+#log { flex: 1 1 45%; overflow: auto; }
+
+#detail-json {
+  margin: 0;
+  font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+#event-log { margin: 0; padding: 0; list-style: none; font: 12px/1.5 ui-monospace, Menlo, monospace; }
+#event-log li { padding: 2px 4px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#event-log li:hover { background: var(--border); }
+#event-log .time { color: var(--muted); margin-right: 6px; }
+#event-log .rejected { color: var(--rejection); }
+
+/* graph */
+#arrow path { fill: var(--edge); }
+
+.edge { fill: none; stroke: var(--edge); stroke-width: 2; }
+.edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
+[data-edge]:hover .edge, [data-edge].selected .edge { stroke: var(--edge-lit); }
+
+.node { cursor: pointer; }
+.node circle { fill: var(--background); stroke: var(--node-script); stroke-width: 2.5; }
+.node.type-llm circle { stroke: var(--node-llm); }
+.node.type-human circle { stroke: var(--node-human); }
+.node.type-source circle { stroke: var(--node-source); }
+.node.launched circle { fill: #1b2233; }
+.node.closed circle { stroke-dasharray: 5 4; }
+.node.selected circle { stroke: var(--selection); }
+.node.spawned circle, .node.joined circle { animation: birth 1.2s ease-out 2; }
+@keyframes birth {
+  0% { stroke-width: 10; }
+  100% { stroke-width: 2.5; }
+}
+.node .label { fill: var(--text); font-size: 18px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.node .role { fill: var(--muted); font-size: 12px; text-anchor: middle; pointer-events: none; }
+
+.dot {
+  fill: var(--dot);
+  cursor: pointer;
+  filter: drop-shadow(0 0 5px var(--dot)) drop-shadow(0 0 10px var(--dot));
+}
+.dot.written { fill: var(--node-source); filter: drop-shadow(0 0 5px var(--node-source)) drop-shadow(0 0 10px var(--node-source)); }
+.dot.dimmed { fill: var(--dot-dimmed); filter: none; }
+.dot.selected { stroke: var(--selection); stroke-width: 2; }
+
+.rejection { cursor: pointer; }
+.rejection circle { fill: var(--background); stroke: var(--rejection); stroke-width: 2; }
+.rejection line { stroke: var(--rejection); stroke-width: 2.5; stroke-linecap: round; }
+.rejection.selected circle { stroke: var(--selection); }
+
+@media (max-width: 860px) {
+  body { height: auto; min-height: 100vh; }
+  main { grid-template-columns: 1fr; grid-template-rows: auto; }
+  aside { border-left: 0; border-top: 1px solid var(--border); }
+  #graph { min-height: 320px; }
+}

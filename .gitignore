@@ -1,5 +1,5 @@
 __pycache__/
-# Lo stato di un progetto vive fuori dal motore (antfarm D17): partite e
-# registro stanno nel cappello privato, mai in questo repo.
-partite/
-registro/
+# The state of a project lives outside the engine (antfarm D17): matches and the
+# registry stay in the private umbrella repo, never in this repo.
+matches/
+registry/

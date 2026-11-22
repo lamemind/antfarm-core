@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "description": "Exquisite corpse, before the change: A, B, C in a circle. The director writes the first line to A and the change notice to C; every node can write to the director, but only the one that receives the last turn does.",
+  "nodes": [
+    {"id": "director", "type": "script", "role": "gives the first line, changes the graph, closes"},
+    {"id": "A", "type": "llm", "role": "writes a line"},
+    {"id": "B", "type": "llm", "role": "writes a line"},
+    {"id": "C", "type": "llm", "role": "writes a line"}
+  ],
+  "edges": [
+    {"from": "director", "to": "A", "rights": ["know", "write"]},
+    {"from": "director", "to": "C", "rights": ["know", "write"]},
+    {"from": "A", "to": "B", "rights": ["know", "write"]},
+    {"from": "B", "to": "C", "rights": ["know", "write"]},
+    {"from": "C", "to": "A", "rights": ["know", "write"]},
+    {"from": "A", "to": "director", "rights": ["know", "write"]},
+    {"from": "B", "to": "director", "rights": ["know", "write"]},
+    {"from": "C", "to": "director", "rights": ["know", "write"]}
+  ]
+}

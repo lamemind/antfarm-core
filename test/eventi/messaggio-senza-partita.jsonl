@@ -1,1 +1,0 @@
-{"classe": "messaggio", "tipo": "consegnato", "ts": "2026-10-26T12:08:52.160+01:00", "partita": null, "indice": 2, "riga": {"ts": "2026-10-26T12:08:52.160+01:00", "partita": null, "id": "m-c98c59d6e643", "esito": "consegnato", "motivo": null, "da": "A", "a": "B", "versione": 1, "testo": "Sono il nodo C, non il nodo A: registrami come C.", "parole": 11, "pid_chiamante": 1026971}}

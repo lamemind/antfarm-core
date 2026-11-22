@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "description": "Leavitt on a chain: A–B–C–D–E, each node writes to its chain neighbors; A and E have a single neighbor. In addition the director writes each node its card and each node writes the director its declaration.",
+  "nodes": [
+    {"id": "director", "type": "script", "role": "deals the cards and receives the declarations"},
+    {"id": "A", "type": "llm", "role": "end of the chain"},
+    {"id": "B", "type": "llm", "role": "player"},
+    {"id": "C", "type": "llm", "role": "player"},
+    {"id": "D", "type": "llm", "role": "player"},
+    {"id": "E", "type": "llm", "role": "end of the chain"}
+  ],
+  "edges": [
+    {"from": "director", "to": "A", "rights": ["know", "write"]},
+    {"from": "director", "to": "B", "rights": ["know", "write"]},
+    {"from": "director", "to": "C", "rights": ["know", "write"]},
+    {"from": "director", "to": "D", "rights": ["know", "write"]},
+    {"from": "director", "to": "E", "rights": ["know", "write"]},
+    {"from": "A", "to": "B", "rights": ["know", "write"]},
+    {"from": "B", "to": "A", "rights": ["know", "write"]},
+    {"from": "B", "to": "C", "rights": ["know", "write"]},
+    {"from": "C", "to": "B", "rights": ["know", "write"]},
+    {"from": "C", "to": "D", "rights": ["know", "write"]},
+    {"from": "D", "to": "C", "rights": ["know", "write"]},
+    {"from": "D", "to": "E", "rights": ["know", "write"]},
+    {"from": "E", "to": "D", "rights": ["know", "write"]},
+    {"from": "A", "to": "director", "rights": ["know", "write"]},
+    {"from": "B", "to": "director", "rights": ["know", "write"]},
+    {"from": "C", "to": "director", "rights": ["know", "write"]},
+    {"from": "D", "to": "director", "rights": ["know", "write"]},
+    {"from": "E", "to": "director", "rights": ["know", "write"]}
+  ]
+}

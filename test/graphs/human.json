@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "Negative test of the passive human node: A writes to the human and to B, the human writes to A but has no process.",
+  "nodes": [
+    {"id": "director", "type": "script", "role": "opens and closes the negative test"},
+    {"id": "umano", "type": "human", "role": "passive"},
+    {"id": "A", "type": "llm", "role": "asks the human"},
+    {"id": "B", "type": "llm", "role": "neighbor of A"}
+  ],
+  "edges": [
+    {"from": "director", "to": "A", "rights": ["know", "write"]},
+    {"from": "umano", "to": "A", "rights": ["know", "write"]},
+    {"from": "A", "to": "umano", "rights": ["know", "write"]},
+    {"from": "A", "to": "B", "rights": ["know", "write"]},
+    {"from": "B", "to": "A", "rights": ["know", "write"]}
+  ]
+}

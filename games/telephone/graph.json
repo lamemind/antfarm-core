@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "Telephone: the director writes to A, each node writes only to the next one, D delivers to the director.",
+  "nodes": [
+    {"id": "director", "type": "script", "role": "launches the match and receives the arrival"},
+    {"id": "A", "type": "llm", "role": "first link"},
+    {"id": "B", "type": "llm", "role": "link"},
+    {"id": "C", "type": "llm", "role": "link"},
+    {"id": "D", "type": "llm", "role": "last link"}
+  ],
+  "edges": [
+    {"from": "director", "to": "A", "rights": ["know", "write"]},
+    {"from": "A", "to": "B", "rights": ["know", "write"]},
+    {"from": "B", "to": "C", "rights": ["know", "write"]},
+    {"from": "C", "to": "D", "rights": ["know", "write"]},
+    {"from": "D", "to": "director", "rights": ["know", "write"]}
+  ]
+}

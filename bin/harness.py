@@ -3,38 +3,39 @@
 # requires-python = ">=3.11"
 # dependencies = ["websockets==17.3"]
 # ///
-"""Harness di osservabilità del motore: legge le sorgenti del motore, ne fa eventi, li pubblica su un WebSocket.
+"""Observability harness of the engine: reads the engine's sources, turns them into events, publishes them on a WebSocket.
 
-    orchestra/bin/harness.py vivo [--porta N]
-        segue dal vivo le partite aperte all'accensione e quelle che nascono dopo. Legge il log
-        dei messaggi dall'inizio e poi ne segue la coda, e le cartelle delle partite per
-        apertura, lancio e chiusura dei nodi, chiusura della partita: parte prima o dopo la regia
-        senza perdere righe. Ogni client riceve prima gli eventi già emessi, poi quelli nuovi.
+    antfarm-core/bin/harness.py live [--port N]
+        follows live the matches open at startup and those born later. Reads the message log
+        from the start and then follows its tail, and the match directories for the opening,
+        the launch and closing of the nodes, the closing of the match: it starts before or after
+        the director without losing rows. Every client receives first the events already
+        emitted, then the new ones.
 
-    orchestra/bin/harness.py replay <partita>... [--velocita V] [--porta N]
-        rigioca partite già giocate, una dopo l'altra, in ordine di ts e coi loro tempi divisi
-        per V (default 1); V = 0 emette senza attesa. Ogni client riceve il replay intero
-        dall'inizio, poi il canale si chiude.
+    antfarm-core/bin/harness.py replay <match>... [--speed V] [--port N]
+        replays matches already played, one after the other, in ts order and with their timing
+        divided by V (default 1); V = 0 emits without waiting. Every client receives the whole
+        replay from the start, then the channel closes.
 
-    orchestra/bin/harness.py flusso <eventi.jsonl> [--velocita V] [--porta N]
-        come replay, ma da un file di eventi già fatti, inviati così come sono scritti: il
-        collaudo di ciò che il motore non produce ancora, come lo spawn.
+    antfarm-core/bin/harness.py stream <events.jsonl> [--speed V] [--port N]
+        like replay, but from a file of ready-made events, sent exactly as they are written: the
+        acceptance test of what the engine does not produce yet, such as the spawn.
 
-Tre classi di evento, schema in schema/evento.schema.json: sessione (partita-aperta,
-partita-chiusa, nodo-lanciato, nodo-chiuso, da meta.json e nodi.json; grafo-cambiato, da grafi/),
-messaggio (consegnato, rifiutato, letto, scritto: le quattro specie di riga del log dei messaggi),
-spawn. Ogni evento avvolge la riga sorgente intatta nel campo `riga`; partita-aperta porta meta.json
-e la prima versione del grafo della partita, e la vista disegna da lì; grafo-cambiato porta il file
-della versione nuova e, in cima, il delta rispetto alla precedente. Le righe del log senza partita
-(mittente-ignoto) non diventano eventi: si contano, e il conteggio esce su stderr alla chiusura.
+Three event classes, schema in schema/event.schema.json: lifecycle (match-opened, match-closed,
+node-launched, node-closed, from meta.json and nodes.json; graph-changed, from graphs/), message
+(delivered, rejected, received, written: the four kinds of row in the message log), spawn. Every
+event wraps the source row intact in the `row` field; match-opened carries meta.json and the first
+version of the match's graph, and the view draws from there; graph-changed carries the file of the
+new version and, at the top, the delta from the previous one. The log rows without a match
+(unknown-sender) do not become events: they are counted, and the count goes to stderr on shutdown.
 
-Una porta sola, legata a 127.0.0.1: `/` serve la vista, `/canale.json` il modo e la velocità,
-`/eventi` il WebSocket. Il WebSocket rifiuta le pagine d'altra origine, perché il log porta il
-testo integrale dei messaggi. L'harness non scrive in registro/ né in partite/: legge soltanto.
-Li legge dalla radice dello stato, ANTFARM_STATE_DIR, e ogni modo la vuole.
+One port only, bound to 127.0.0.1: `/` serves the view, `/channel.json` the mode and the speed,
+`/events` the WebSocket. The WebSocket rejects pages from another origin, because the log carries
+the full text of the messages. The harness does not write in registry/ or in matches/: it only
+reads. It reads them from the state root, ANTFARM_STATE_DIR, and every mode requires it.
 
-Porta di default 8740; --porta 0 la fa scegliere al sistema. La prima riga su stdout porta
-l'indirizzo. Si ferma con SIGINT o SIGTERM.
+Default port 8740; --port 0 lets the system choose it. The first line on stdout carries the
+address. It stops on SIGINT or SIGTERM.
 """
 
 import argparse
@@ -50,426 +51,426 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import grafo as libgrafo  # noqa: E402
+import graph as libgraph  # noqa: E402
 
-RADICE_STATO = libgrafo.radice_stato()
-PARTITE = RADICE_STATO / "partite"
-LOG_MESSAGGI = RADICE_STATO / "registro" / "messaggi.jsonl"
-CARTELLA_VISTA = libgrafo.radice_codice() / "vista"
-INDIRIZZO = "127.0.0.1"
-PORTA_DEFAULT = 8740
-PASSO_DIRETTA_S = 0.1
-PERCORSO_EVENTI = "/eventi"
-FILE_VISTA = {
+STATE_ROOT = libgraph.state_root()
+MATCHES = STATE_ROOT / "matches"
+MESSAGE_LOG = STATE_ROOT / "registry" / "messages.jsonl"
+VIEW_DIR = libgraph.code_root() / "view"
+ADDRESS = "127.0.0.1"
+DEFAULT_PORT = 8740
+LIVE_STEP_S = 0.1
+EVENTS_PATH = "/events"
+VIEW_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
-    "/vista.js": ("vista.js", "text/javascript; charset=utf-8"),
-    "/vista.css": ("vista.css", "text/css; charset=utf-8"),
+    "/view.js": ("view.js", "text/javascript; charset=utf-8"),
+    "/view.css": ("view.css", "text/css; charset=utf-8"),
 }
-# A parità di ts, l'ordine del ciclo di vita: il grafo nuovo prima del lancio del nodo che ci entra,
-# il lancio prima dei messaggi, la chiusura dopo.
-PRIORITA_A_PARI_TS = {"grafo-cambiato": -1, "nodo-lanciato": 0, "consegnato": 1, "rifiutato": 1, "letto": 1, "scritto": 1,
-                      "spawn": 1, "nodo-chiuso": 2}
+# At equal ts, the lifecycle order: the new graph before the launch of the node that enters it,
+# the launch before the messages, the closing after.
+PRIORITY_AT_EQUAL_TS = {"graph-changed": -1, "node-launched": 0, "delivered": 1, "rejected": 1, "received": 1, "written": 1,
+                        "spawn": 1, "node-closed": 2}
 
 
-# <editor-fold defaultstate="collapsed" desc="Sorgenti: file del motore → eventi">
-def leggi_json(percorso):
-    """Il contenuto di un file JSON; None se manca o è a metà scrittura."""
+# <editor-fold defaultstate="collapsed" desc="Sources: engine files → events">
+def read_json(path):
+    """The content of a JSON file; None if it is missing or half written."""
     try:
-        return json.loads(percorso.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def righe_del_log(contenuto):
-    """(indice, riga) per ogni riga del log, con l'indice da 1 come numero di riga del file.
-    Il taglio è sul solo a capo: il bus scrive senza escape ASCII, e un testo può portare
-    separatori di riga Unicode che splitlines() prenderebbe per a capo."""
-    righe = []
-    for indice, blocco in enumerate(contenuto.split(b"\n"), start=1):
-        if not blocco.strip():
+def split_log_rows(content):
+    """(index, row) for every row of the log, with the index from 1 as the line number in the file.
+    The split is on newline only: the bus writes without ASCII escapes, and a text can carry
+    Unicode line separators that splitlines() would take for newlines."""
+    rows = []
+    for index, block in enumerate(content.split(b"\n"), start=1):
+        if not block.strip():
             continue
         try:
-            righe.append((indice, json.loads(blocco)))
+            rows.append((index, json.loads(block)))
         except json.JSONDecodeError:
             continue
-    return righe
+    return rows
 
 
-def istante(ts):
+def instant(ts):
     return datetime.fromisoformat(ts).timestamp()
 
 
-def evento_messaggio(indice, riga):
-    return {"classe": "messaggio", "tipo": riga["esito"], "ts": riga["ts"], "partita": riga["partita"],
-            "indice": indice, "riga": riga}
+def message_event(index, row):
+    return {"class": "message", "type": row["outcome"], "ts": row["ts"], "match": row["match"],
+            "index": index, "row": row}
 
 
-def evento_partita_aperta(cartella, meta, grafo):
-    return {"classe": "sessione", "tipo": "partita-aperta", "ts": meta["inizio"], "partita": cartella.name,
-            "riga": {"meta": meta, "grafo": grafo}}
+def match_opened_event(directory, meta, graph):
+    return {"class": "lifecycle", "type": "match-opened", "ts": meta["start"], "match": directory.name,
+            "row": {"meta": meta, "graph": graph}}
 
 
-def evento_partita_chiusa(cartella, meta):
-    return {"classe": "sessione", "tipo": "partita-chiusa", "ts": meta["fine"], "partita": cartella.name, "riga": meta}
+def match_closed_event(directory, meta):
+    return {"class": "lifecycle", "type": "match-closed", "ts": meta["end"], "match": directory.name, "row": meta}
 
 
-def versioni_del_grafo(cartella):
-    """Le voci di grafi/v<N>.json della partita, in ordine di versione. Una partita nata prima di
-    grafi/ dà la lista vuota."""
-    voci = [leggi_json(percorso) for percorso in (cartella / "grafi").glob("v*.json")]
-    return sorted((voce for voce in voci if voce is not None), key=lambda voce: voce["grafo"]["versione"])
+def graph_versions(directory):
+    """The entries of the match's graphs/v<N>.json, in version order. A match born before
+    graphs/ gives the empty list."""
+    entries = [read_json(path) for path in (directory / "graphs").glob("v*.json")]
+    return sorted((entry for entry in entries if entry is not None), key=lambda entry: entry["graph"]["version"])
 
 
-def grafo_iniziale(cartella):
-    """Il grafo con cui la partita si è aperta: la prima versione conservata, oppure grafo.json per
-    una partita nata prima di grafi/, che non ha mai cambiato grafo."""
-    versioni = versioni_del_grafo(cartella)
-    return versioni[0]["grafo"] if versioni else leggi_json(cartella / "grafo.json")
+def initial_graph(directory):
+    """The graph the match opened with: the first stored version, or graph.json for a match
+    born before graphs/, which never changed graph."""
+    versions = graph_versions(directory)
+    return versions[0]["graph"] if versions else read_json(directory / "graph.json")
 
 
-def evento_grafo_cambiato(cartella, precedente, voce):
-    return {"classe": "sessione", "tipo": "grafo-cambiato", "ts": voce["in_vigore"], "partita": cartella.name,
-            "delta": libgrafo.delta(precedente["grafo"], voce["grafo"]), "riga": voce}
+def graph_changed_event(directory, previous, entry):
+    return {"class": "lifecycle", "type": "graph-changed", "ts": entry["effective"], "match": directory.name,
+            "delta": libgraph.delta(previous["graph"], entry["graph"]), "row": entry}
 
 
-def evento_nodo(tipo, cartella, id_nodo, voce):
-    campo = "lanciato" if tipo == "nodo-lanciato" else "chiuso"
-    return {"classe": "sessione", "tipo": tipo, "ts": voce[campo], "partita": cartella.name, "nodo": id_nodo,
-            "riga": voce}
+def node_event(kind, directory, node_id, entry):
+    field = "launched" if kind == "node-launched" else "closed"
+    return {"class": "lifecycle", "type": kind, "ts": entry[field], "match": directory.name, "node": node_id,
+            "row": entry}
 
 
-def eventi_dei_nodi(cartella, nodi):
-    """nodo-lanciato per ogni voce con `lanciato`, nodo-chiuso per ogni voce con `chiuso`. La regia
-    non porta `lanciato`: è lei che apre la partita."""
-    eventi = []
-    for id_nodo, voce in (nodi or {}).get("nodi", {}).items():
-        if voce.get("lanciato"):
-            eventi.append(evento_nodo("nodo-lanciato", cartella, id_nodo, voce))
-        if voce.get("chiuso"):
-            eventi.append(evento_nodo("nodo-chiuso", cartella, id_nodo, voce))
-    return eventi
+def node_events(directory, nodes):
+    """node-launched for every entry with `launched`, node-closed for every entry with `closed`. The
+    director does not carry `launched`: it is the one that opens the match."""
+    events = []
+    for node_id, entry in (nodes or {}).get("nodes", {}).items():
+        if entry.get("launched"):
+            events.append(node_event("node-launched", directory, node_id, entry))
+        if entry.get("closed"):
+            events.append(node_event("node-closed", directory, node_id, entry))
+    return events
 # </editor-fold>
 
 
-# <editor-fold defaultstate="collapsed" desc="Replay: una partita già giocata, rigiocata coi suoi tempi">
-def cartella_partita(argomento):
-    for candidata in (PARTITE / argomento, Path(argomento)):
-        if (candidata / "meta.json").is_file() and (candidata / "grafo.json").is_file():
-            return candidata.resolve()
-    raise SystemExit(f"partita non trovata: {argomento} (né sotto {PARTITE} né come cartella)")
+# <editor-fold defaultstate="collapsed" desc="Replay: a match already played, replayed with its own timing">
+def match_dir(arg):
+    for candidate in (MATCHES / arg, Path(arg)):
+        if (candidate / "meta.json").is_file() and (candidate / "graph.json").is_file():
+            return candidate.resolve()
+    raise SystemExit(f"match not found: {arg} (neither under {MATCHES} nor as a directory)")
 
 
-def eventi_partita(cartella, righe_partita):
-    """Gli eventi di una partita chiusa nell'ordine del replay: apertura col grafo della prima
-    versione, poi cambi di grafo, lanci, messaggi e chiusure dei nodi in ordine di ts, poi la
-    chiusura della partita. Apertura e chiusura stanno agli estremi perché meta.json porta i
-    secondi e il log i millesimi: la chiusura troncata al secondo cadrebbe prima dell'ultima
-    lettura."""
-    meta, grafo = leggi_json(cartella / "meta.json"), grafo_iniziale(cartella)
-    versioni = versioni_del_grafo(cartella)
-    centro = [evento_grafo_cambiato(cartella, precedente, voce) for precedente, voce in zip(versioni, versioni[1:])]
-    centro += eventi_dei_nodi(cartella, leggi_json(cartella / "nodi.json"))
-    centro += [evento_messaggio(indice, riga) for indice, riga in righe_partita]
-    centro.sort(key=lambda evento: (istante(evento["ts"]), PRIORITA_A_PARI_TS[evento["tipo"]]))
-    chiusura = [evento_partita_chiusa(cartella, meta)] if meta.get("fine") else []
-    return [evento_partita_aperta(cartella, meta, grafo)] + centro + chiusura
+def match_events(directory, match_rows):
+    """The events of a closed match in replay order: the opening with the graph of the first
+    version, then graph changes, launches, messages and node closings in ts order, then the
+    closing of the match. Opening and closing sit at the two ends because meta.json carries
+    seconds and the log milliseconds: the closing truncated to the second would fall before the
+    last receipt."""
+    meta, graph = read_json(directory / "meta.json"), initial_graph(directory)
+    versions = graph_versions(directory)
+    center = [graph_changed_event(directory, previous, entry) for previous, entry in zip(versions, versions[1:])]
+    center += node_events(directory, read_json(directory / "nodes.json"))
+    center += [message_event(index, row) for index, row in match_rows]
+    center.sort(key=lambda event: (instant(event["ts"]), PRIORITY_AT_EQUAL_TS[event["type"]]))
+    closure = [match_closed_event(directory, meta)] if meta.get("end") else []
+    return [match_opened_event(directory, meta, graph)] + center + closure
 
 
-def programma(gruppi, velocita):
-    """(secondi dall'inizio del replay, testo dell'evento) per ogni evento. Dentro un gruppo i tempi
-    sono quelli dei ts divisi per la velocità, mai all'indietro; fra un gruppo e il successivo
-    nessuna pausa."""
-    risultato, scostamento = [], 0.0
-    for eventi in gruppi:
-        if not eventi:
+def schedule(groups, speed):
+    """(seconds from the start of the replay, text of the event) for every event. Within a group
+    the times are those of the ts divided by the speed, never backwards; between a group and the
+    next there is no pause."""
+    result, offset = [], 0.0
+    for events in groups:
+        if not events:
             continue
-        origine, ultimo = istante(eventi[0]["ts"]), scostamento
-        for evento in eventi:
-            quando = scostamento + ((istante(evento["ts"]) - origine) / velocita if velocita > 0 else 0.0)
-            ultimo = max(ultimo, quando)
-            risultato.append((ultimo, json.dumps(evento, ensure_ascii=False)))
-        scostamento = ultimo
-    return risultato
+        origin, last = instant(events[0]["ts"]), offset
+        for event in events:
+            when = offset + ((instant(event["ts"]) - origin) / speed if speed > 0 else 0.0)
+            last = max(last, when)
+            result.append((last, json.dumps(event, ensure_ascii=False)))
+        offset = last
+    return result
 
 
-def programma_da_flusso(percorso, velocita):
-    """Il programma di un file di eventi: ordine del file, tempi dai ts, testo inviato com'è scritto."""
-    testi = [testo for testo in Path(percorso).read_text(encoding="utf-8").split("\n") if testo.strip()]
-    eventi = [json.loads(testo) for testo in testi]
-    risultato, ultimo = [], 0.0
-    origine = istante(eventi[0]["ts"]) if eventi else 0.0
-    for evento, testo in zip(eventi, testi):
-        quando = (istante(evento["ts"]) - origine) / velocita if velocita > 0 else 0.0
-        ultimo = max(ultimo, quando)
-        risultato.append((ultimo, testo))
-    return risultato
+def schedule_from_stream(path, speed):
+    """The schedule of an events file: file order, times from the ts, text sent as it is written."""
+    texts = [text for text in Path(path).read_text(encoding="utf-8").split("\n") if text.strip()]
+    events = [json.loads(text) for text in texts]
+    result, last = [], 0.0
+    origin = instant(events[0]["ts"]) if events else 0.0
+    for event, text in zip(events, texts):
+        when = (instant(event["ts"]) - origin) / speed if speed > 0 else 0.0
+        last = max(last, when)
+        result.append((last, text))
+    return result
 
 
-async def rigioca(connessione, eventi_programmati):
-    ciclo = asyncio.get_running_loop()
-    partenza = ciclo.time()
+async def replay_events(connection, scheduled_events):
+    loop = asyncio.get_running_loop()
+    departure = loop.time()
     try:
-        for quando, testo in eventi_programmati:
-            attesa = partenza + quando - ciclo.time()
-            if attesa > 0:
-                await asyncio.sleep(attesa)
-            await connessione.send(testo)
-        await connessione.close(1000, "fine replay")
+        for when, text in scheduled_events:
+            wait = departure + when - loop.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await connection.send(text)
+        await connection.close(1000, "end of replay")
     except ConnectionClosed:
         pass
 # </editor-fold>
 
 
-# <editor-fold defaultstate="collapsed" desc="Dal vivo: coda del log e cartelle delle partite">
-class Seguita:
-    def __init__(self, cartella, versione):
-        self.cartella = cartella
-        self.versione = versione
-        self.lanciati = set()
-        self.chiusi = set()
-        self.chiusa = False
+# <editor-fold defaultstate="collapsed" desc="Live: tail of the log and match directories">
+class FollowedMatch:
+    def __init__(self, directory, version):
+        self.directory = directory
+        self.version = version
+        self.launched = set()
+        self.closed_nodes = set()
+        self.closed = False
 
 
-class Diretta:
-    """Segue il motore mentre gioca. A ogni giro legge le righe nuove del log, poi guarda le
-    cartelle delle partite. Prima di emettere una chiusura — di un nodo o della partita — rilegge
-    il log: la regia scrive la chiusura dopo l'ultima riga di quella partita, quindi la rilettura
-    porta ogni riga che la precede."""
+class Live:
+    """Follows the engine while it plays. On every tick it reads the new rows of the log, then
+    looks at the match directories. Before emitting a closing — of a node or of the match — it
+    reads the log again: the director writes the closing after the last row of that match, so the
+    second read brings every row that precedes it."""
 
     def __init__(self):
-        self.posizione = 0
-        self.resto = b""
-        self.righe_lette = 0
-        self.seguite = {}
-        self.ignorate = set()
-        self.senza_partita = 0
-        self.senza_cartella = 0
-        self.emessi = []
-        self.iscritti = set()
+        self.position = 0
+        self.remainder = b""
+        self.rows_read = 0
+        self.followed_matches = {}
+        self.ignored = set()
+        self.without_match = 0
+        self.without_dir = 0
+        self.emitted = []
+        self.subscribers = set()
 
-    def accendi(self):
-        """Le partite già chiuse all'accensione non si seguono: sono materia del replay."""
-        if PARTITE.is_dir():
-            for cartella in PARTITE.iterdir():
-                if (leggi_json(cartella / "nodi.json") or {}).get("stato") == "chiusa":
-                    self.ignorate.add(cartella.name)
+    def start(self):
+        """Matches already closed at startup are not followed: they are material for the replay."""
+        if MATCHES.is_dir():
+            for directory in MATCHES.iterdir():
+                if (read_json(directory / "nodes.json") or {}).get("status") == "closed":
+                    self.ignored.add(directory.name)
 
-    def pubblica(self, evento):
-        testo = json.dumps(evento, ensure_ascii=False)
-        self.emessi.append(testo)
-        for coda in self.iscritti:
-            coda.put_nowait(testo)
+    def publish(self, event):
+        text = json.dumps(event, ensure_ascii=False)
+        self.emitted.append(text)
+        for queue in self.subscribers:
+            queue.put_nowait(text)
 
-    def iscrivi(self):
-        """Una coda che parte con gli eventi già emessi e riceve i nuovi: copia e iscrizione stanno
-        nello stesso passo sincrono, quindi nessun evento cade fra le due."""
-        coda = asyncio.Queue()
-        for testo in self.emessi:
-            coda.put_nowait(testo)
-        self.iscritti.add(coda)
-        return coda
+    def subscribe(self):
+        """A queue that starts with the events already emitted and receives the new ones: copy and
+        subscription sit in the same synchronous step, so no event falls between the two."""
+        queue = asyncio.Queue()
+        for text in self.emitted:
+            queue.put_nowait(text)
+        self.subscribers.add(queue)
+        return queue
 
-    def righe_nuove(self):
+    def new_rows(self):
         try:
-            with open(LOG_MESSAGGI, "rb") as log:
-                log.seek(self.posizione)
-                dati = log.read()
+            with open(MESSAGE_LOG, "rb") as log:
+                log.seek(self.position)
+                data = log.read()
         except FileNotFoundError:
             return []
-        self.posizione += len(dati)
-        blocchi = (self.resto + dati).split(b"\n")
-        self.resto = blocchi.pop()
-        primo = self.righe_lette + 1
-        self.righe_lette += len(blocchi)
-        return [(primo + indice - 1, riga) for indice, riga in righe_del_log(b"\n".join(blocchi))]
+        self.position += len(data)
+        blocks = (self.remainder + data).split(b"\n")
+        self.remainder = blocks.pop()
+        first = self.rows_read + 1
+        self.rows_read += len(blocks)
+        return [(first + index - 1, row) for index, row in split_log_rows(b"\n".join(blocks))]
 
-    def apri(self, partita):
-        if partita in self.seguite:
-            return self.seguite[partita]
-        cartella = PARTITE / partita
-        meta, grafo = leggi_json(cartella / "meta.json"), grafo_iniziale(cartella)
-        if meta is None or grafo is None:
+    def open_match(self, match):
+        if match in self.followed_matches:
+            return self.followed_matches[match]
+        directory = MATCHES / match
+        meta, graph = read_json(directory / "meta.json"), initial_graph(directory)
+        if meta is None or graph is None:
             return None
-        seguita = self.seguite[partita] = Seguita(cartella, grafo["versione"])
-        self.pubblica(evento_partita_aperta(cartella, meta, grafo))
-        return seguita
+        followed_match = self.followed_matches[match] = FollowedMatch(directory, graph["version"])
+        self.publish(match_opened_event(directory, meta, graph))
+        return followed_match
 
-    def aggiorna_grafi(self, seguita):
-        """Le versioni comparse in grafi/, ognuna col delta dalla precedente. Gira prima di
-        emettere un messaggio, e `grafi/v<N>.json` esiste prima che un messaggio porti N: il
-        client ha già l'arco su cui il pallino deve correre."""
-        versioni = versioni_del_grafo(seguita.cartella)
-        for precedente, voce in zip(versioni, versioni[1:]):
-            if voce["grafo"]["versione"] > seguita.versione:
-                seguita.versione = voce["grafo"]["versione"]
-                self.pubblica(evento_grafo_cambiato(seguita.cartella, precedente, voce))
+    def update_graphs(self, followed_match):
+        """The versions that appeared in graphs/, each with the delta from the previous one. It runs
+        before a message is emitted, and `graphs/v<N>.json` exists before a message carries N: the
+        client already has the edge the dot must run along."""
+        versions = graph_versions(followed_match.directory)
+        for previous, entry in zip(versions, versions[1:]):
+            if entry["graph"]["version"] > followed_match.version:
+                followed_match.version = entry["graph"]["version"]
+                self.publish(graph_changed_event(followed_match.directory, previous, entry))
 
-    def aggiorna_lanci(self, seguita):
-        nodi = leggi_json(seguita.cartella / "nodi.json")
-        for evento in eventi_dei_nodi(seguita.cartella, nodi):
-            if evento["tipo"] == "nodo-lanciato" and evento["nodo"] not in seguita.lanciati:
-                seguita.lanciati.add(evento["nodo"])
-                self.pubblica(evento)
-        return nodi
+    def update_launches(self, followed_match):
+        nodes = read_json(followed_match.directory / "nodes.json")
+        for event in node_events(followed_match.directory, nodes):
+            if event["type"] == "node-launched" and event["node"] not in followed_match.launched:
+                followed_match.launched.add(event["node"])
+                self.publish(event)
+        return nodes
 
-    def leggi_log(self):
-        for indice, riga in self.righe_nuove():
-            partita = riga.get("partita")
-            if partita is None:
-                self.senza_partita += 1
+    def read_log(self):
+        for index, row in self.new_rows():
+            match = row.get("match")
+            if match is None:
+                self.without_match += 1
                 continue
-            if partita in self.ignorate:
+            if match in self.ignored:
                 continue
-            seguita = self.apri(partita)
-            if seguita is None:
-                self.senza_cartella += 1
+            followed_match = self.open_match(match)
+            if followed_match is None:
+                self.without_dir += 1
                 continue
-            self.aggiorna_grafi(seguita)
-            self.aggiorna_lanci(seguita)
-            self.pubblica(evento_messaggio(indice, riga))
+            self.update_graphs(followed_match)
+            self.update_launches(followed_match)
+            self.publish(message_event(index, row))
 
-    def aggiorna_partita(self, partita):
-        seguita = self.apri(partita)
-        if seguita is None or seguita.chiusa:
+    def update_match(self, match):
+        followed_match = self.open_match(match)
+        if followed_match is None or followed_match.closed:
             return
-        self.aggiorna_grafi(seguita)
-        nodi = self.aggiorna_lanci(seguita)
-        chiusure = [evento for evento in eventi_dei_nodi(seguita.cartella, nodi)
-                    if evento["tipo"] == "nodo-chiuso" and evento["nodo"] not in seguita.chiusi]
-        meta = leggi_json(seguita.cartella / "meta.json") or {}
-        if not chiusure and not meta.get("fine"):
+        self.update_graphs(followed_match)
+        nodes = self.update_launches(followed_match)
+        closures = [event for event in node_events(followed_match.directory, nodes)
+                    if event["type"] == "node-closed" and event["node"] not in followed_match.closed_nodes]
+        meta = read_json(followed_match.directory / "meta.json") or {}
+        if not closures and not meta.get("end"):
             return
-        self.leggi_log()
-        for evento in sorted(chiusure, key=lambda evento: istante(evento["ts"])):
-            seguita.chiusi.add(evento["nodo"])
-            self.pubblica(evento)
-        if meta.get("fine"):
-            seguita.chiusa = True
-            self.pubblica(evento_partita_chiusa(seguita.cartella, meta))
+        self.read_log()
+        for event in sorted(closures, key=lambda event: instant(event["ts"])):
+            followed_match.closed_nodes.add(event["node"])
+            self.publish(event)
+        if meta.get("end"):
+            followed_match.closed = True
+            self.publish(match_closed_event(followed_match.directory, meta))
 
-    def giro(self):
-        self.leggi_log()
-        if PARTITE.is_dir():
-            for cartella in sorted(PARTITE.iterdir()):
-                if cartella.is_dir() and cartella.name not in self.ignorate:
-                    self.aggiorna_partita(cartella.name)
+    def tick(self):
+        self.read_log()
+        if MATCHES.is_dir():
+            for directory in sorted(MATCHES.iterdir()):
+                if directory.is_dir() and directory.name not in self.ignored:
+                    self.update_match(directory.name)
 
-    async def segui(self):
+    async def follow(self):
         while True:
-            self.giro()
-            await asyncio.sleep(PASSO_DIRETTA_S)
+            self.tick()
+            await asyncio.sleep(LIVE_STEP_S)
 
 
-async def inoltra(connessione, coda):
+async def forward(connection, queue):
     try:
         while True:
-            await connessione.send(await coda.get())
+            await connection.send(await queue.get())
     except ConnectionClosed:
         pass
 
 
-async def servi_diretta(diretta, connessione):
-    coda = diretta.iscrivi()
-    invio = asyncio.create_task(inoltra(connessione, coda))
+async def serve_live(live, connection):
+    queue = live.subscribe()
+    sending = asyncio.create_task(forward(connection, queue))
     try:
-        await connessione.wait_closed()
+        await connection.wait_closed()
     finally:
-        diretta.iscritti.discard(coda)
-        invio.cancel()
+        live.subscribers.discard(queue)
+        sending.cancel()
 # </editor-fold>
 
 
-# <editor-fold defaultstate="collapsed" desc="HTTP sulla stessa porta: vista, stato del canale, origine">
-def risposta_http(canale):
-    def rispondi(connessione, richiesta):
-        percorso = richiesta.path.split("?", 1)[0]
-        if percorso == PERCORSO_EVENTI:
-            origine = richiesta.headers.get("Origin")
-            ammesse = {f"http://{INDIRIZZO}:{canale['porta']}", f"http://localhost:{canale['porta']}"}
-            if origine is not None and origine not in ammesse:
-                return connessione.respond(HTTPStatus.FORBIDDEN, f"origine non ammessa: {origine}\n")
+# <editor-fold defaultstate="collapsed" desc="HTTP on the same port: view, channel state, origin">
+def http_response(channel):
+    def reply(connection, request):
+        path = request.path.split("?", 1)[0]
+        if path == EVENTS_PATH:
+            origin = request.headers.get("Origin")
+            allowed = {f"http://{ADDRESS}:{channel['port']}", f"http://localhost:{channel['port']}"}
+            if origin is not None and origin not in allowed:
+                return connection.respond(HTTPStatus.FORBIDDEN, f"origin not allowed: {origin}\n")
             return None
-        if percorso == "/canale.json":
-            return con_tipo(connessione.respond(HTTPStatus.OK, json.dumps(canale, ensure_ascii=False)),
-                            "application/json; charset=utf-8")
-        if percorso in FILE_VISTA:
-            nome, tipo = FILE_VISTA[percorso]
+        if path == "/channel.json":
+            return with_type(connection.respond(HTTPStatus.OK, json.dumps(channel, ensure_ascii=False)),
+                             "application/json; charset=utf-8")
+        if path in VIEW_FILES:
+            name, kind = VIEW_FILES[path]
             try:
-                testo = (CARTELLA_VISTA / nome).read_text(encoding="utf-8")
+                text = (VIEW_DIR / name).read_text(encoding="utf-8")
             except OSError:
-                return connessione.respond(HTTPStatus.NOT_FOUND, f"vista assente: {nome}\n")
-            return con_tipo(connessione.respond(HTTPStatus.OK, testo), tipo)
-        return connessione.respond(HTTPStatus.NOT_FOUND, "non trovato\n")
-    return rispondi
+                return connection.respond(HTTPStatus.NOT_FOUND, f"view missing: {name}\n")
+            return with_type(connection.respond(HTTPStatus.OK, text), kind)
+        return connection.respond(HTTPStatus.NOT_FOUND, "not found\n")
+    return reply
 
 
-def con_tipo(risposta, tipo):
-    del risposta.headers["Content-Type"]
-    risposta.headers["Content-Type"] = tipo
-    risposta.headers["Cache-Control"] = "no-store"
-    return risposta
+def with_type(response, kind):
+    del response.headers["Content-Type"]
+    response.headers["Content-Type"] = kind
+    response.headers["Cache-Control"] = "no-store"
+    return response
 # </editor-fold>
 
 
-async def accendi(argomenti):
-    canale = {"modo": argomenti.modo, "porta": argomenti.porta, "velocita": None, "partite": [], "flusso": None}
-    diretta, eventi_programmati, inseguimento = None, None, None
-    if argomenti.modo == "vivo":
-        diretta = Diretta()
-        diretta.accendi()
-    elif argomenti.modo == "replay":
-        cartelle = [cartella_partita(argomento) for argomento in argomenti.partite]
-        righe = righe_del_log(LOG_MESSAGGI.read_bytes()) if LOG_MESSAGGI.exists() else []
-        gruppi = [eventi_partita(cartella, [(indice, riga) for indice, riga in righe if riga.get("partita") == cartella.name])
-                  for cartella in cartelle]
-        eventi_programmati = programma(gruppi, argomenti.velocita)
-        canale.update(velocita=argomenti.velocita, partite=[cartella.name for cartella in cartelle])
+async def start(args):
+    channel = {"mode": args.mode, "port": args.port, "speed": None, "matches": [], "stream": None}
+    live, scheduled_events, follower = None, None, None
+    if args.mode == "live":
+        live = Live()
+        live.start()
+    elif args.mode == "replay":
+        directories = [match_dir(arg) for arg in args.matches]
+        rows = split_log_rows(MESSAGE_LOG.read_bytes()) if MESSAGE_LOG.exists() else []
+        groups = [match_events(directory, [(index, row) for index, row in rows if row.get("match") == directory.name])
+                  for directory in directories]
+        scheduled_events = schedule(groups, args.speed)
+        channel.update(speed=args.speed, matches=[directory.name for directory in directories])
     else:
-        eventi_programmati = programma_da_flusso(argomenti.file_eventi, argomenti.velocita)
-        canale.update(velocita=argomenti.velocita, flusso=str(argomenti.file_eventi))
+        scheduled_events = schedule_from_stream(args.events_file, args.speed)
+        channel.update(speed=args.speed, stream=str(args.events_file))
 
-    async def gestisci(connessione):
-        if diretta is not None:
-            await servi_diretta(diretta, connessione)
+    async def handle(connection):
+        if live is not None:
+            await serve_live(live, connection)
         else:
-            await rigioca(connessione, eventi_programmati)
+            await replay_events(connection, scheduled_events)
 
-    async with serve(gestisci, INDIRIZZO, argomenti.porta, process_request=risposta_http(canale)) as server:
-        canale["porta"] = server.sockets[0].getsockname()[1]
-        dettaglio = (f"{len(eventi_programmati)} eventi" if eventi_programmati is not None
-                     else f"{len(diretta.ignorate)} partite già chiuse non seguite")
-        print(f"harness · {argomenti.modo} · http://{INDIRIZZO}:{canale['porta']}/ · {dettaglio}", flush=True)
-        if diretta is not None:
-            inseguimento = asyncio.create_task(diretta.segui())
-        fermo = asyncio.get_running_loop().create_future()
-        for segnale in (signal.SIGINT, signal.SIGTERM):
-            asyncio.get_running_loop().add_signal_handler(segnale, lambda: fermo.done() or fermo.set_result(None))
-        await fermo
-        if inseguimento is not None:
-            inseguimento.cancel()
-    if diretta is not None:
-        print(f"harness: righe del log senza partita, non emesse: {diretta.senza_partita} · "
-              f"righe di partite senza cartella leggibile: {diretta.senza_cartella} · "
-              f"eventi emessi: {len(diretta.emessi)}", file=sys.stderr)
+    async with serve(handle, ADDRESS, args.port, process_request=http_response(channel)) as server:
+        channel["port"] = server.sockets[0].getsockname()[1]
+        detail = (f"{len(scheduled_events)} events" if scheduled_events is not None
+                  else f"{len(live.ignored)} matches already closed, not followed")
+        print(f"harness · {args.mode} · http://{ADDRESS}:{channel['port']}/ · {detail}", flush=True)
+        if live is not None:
+            follower = asyncio.create_task(live.follow())
+        stopped = asyncio.get_running_loop().create_future()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(signum, lambda: stopped.done() or stopped.set_result(None))
+        await stopped
+        if follower is not None:
+            follower.cancel()
+    if live is not None:
+        print(f"harness: log rows without a match, not emitted: {live.without_match} · "
+              f"rows of matches without a readable directory: {live.without_dir} · "
+              f"events emitted: {len(live.emitted)}", file=sys.stderr)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sotto = parser.add_subparsers(dest="modo", required=True)
-    vivo = sotto.add_parser("vivo")
-    replay = sotto.add_parser("replay")
-    replay.add_argument("partite", nargs="+")
-    flusso = sotto.add_parser("flusso")
-    flusso.add_argument("file_eventi")
-    for comando in (vivo, replay, flusso):
-        comando.add_argument("--porta", type=int, default=PORTA_DEFAULT)
-    for comando in (replay, flusso):
-        comando.add_argument("--velocita", type=float, default=1.0)
-    argomenti = parser.parse_args()
-    if getattr(argomenti, "velocita", 0) < 0:
-        parser.error("--velocita non può essere negativa")
-    return asyncio.run(accendi(argomenti))
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+    live_parser = subparsers.add_parser("live")
+    replay = subparsers.add_parser("replay")
+    replay.add_argument("matches", nargs="+")
+    stream = subparsers.add_parser("stream")
+    stream.add_argument("events_file")
+    for command in (live_parser, replay, stream):
+        command.add_argument("--port", type=int, default=DEFAULT_PORT)
+    for command in (replay, stream):
+        command.add_argument("--speed", type=float, default=1.0)
+    args = parser.parse_args()
+    if getattr(args, "speed", 0) < 0:
+        parser.error("--speed cannot be negative")
+    return asyncio.run(start(args))
 
 
 if __name__ == "__main__":
