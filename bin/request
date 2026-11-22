@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""The command with which a session of the loop asks the loop something, and reads its mailbox.
+
+    request spawn <position> [text...]   asks a session on a child position of its own; the text,
+                                         if any, becomes the first message of the new session
+    request recv [--wait <seconds>]      the oldest message of its mailbox addressed to it;
+                                         without --wait it does not wait
+
+No command accepts the sender. The command derives it from the process ancestry: it walks up
+/proc from its own parent, and the first ancestor whose (pid, starttime) pair the loop registry
+marks alive is the caller. A caller that no live session explains is rejected with
+`unknown-sender`.
+
+The command decides nothing: `spawn` deposits a request file, the loop accepts, queues or rejects
+it and writes it in its log. The command waits a few seconds for the decision and prints it.
+`recv` reads the mailbox directly: the loop has already put the message there and addressed it.
+
+The texts this command prints reach the LLM sessions, and stay in Italian.
+Exits 0 if the request is accepted, queued or still pending, or if recv reads a message; 1 if the
+loop rejects the request or the caller is unknown; 2 on wrong usage or without a state root;
+3 if recv finds nothing within the wait.
+"""
+
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import graph as libgraph  # noqa: E402
+import loopstate as libstate  # noqa: E402
+
+PATHS = libstate.Paths(libgraph.state_root())
+DECISION_WAIT_S = 5
+RECV_WAIT_MAX_S = 840
+
+
+def caller():
+    found = libstate.identify(PATHS)
+    if found is None:
+        print("rifiutato: unknown-sender — questo processo non discende da nessuna sessione viva del loop",
+              file=sys.stderr)
+    return found
+
+
+def command_spawn(args):
+    if not args:
+        print("uso: request spawn <posizione> [testo...]", file=sys.stderr)
+        return 2
+    found = caller()
+    if found is None:
+        return 1
+    session_id, _ = found
+    request_id = libstate.deposit_request(PATHS, session_id, "spawn", position=args[0], text=" ".join(args[1:]).strip())
+    state = libstate.wait_for_decision(PATHS, request_id, DECISION_WAIT_S)
+    print(f"richiesta {request_id} · spawn {args[0]}: {libstate.describe_decision(state)}")
+    return libstate.exit_code(state)
+
+
+def command_recv(args):
+    wait = 0
+    if args[:1] == ["--wait"] and len(args) == 2 and args[1].isdigit():
+        wait = min(int(args[1]), RECV_WAIT_MAX_S)
+    elif args:
+        print("uso: request recv [--wait <secondi>]", file=sys.stderr)
+        return 2
+    found = caller()
+    if found is None:
+        return 1
+    session_id, entry = found
+    limit = time.monotonic() + wait
+    while True:
+        message = libstate.take_message(PATHS, entry["position"], session_id)
+        if message is not None:
+            break
+        if time.monotonic() >= limit:
+            print("nessun messaggio nella tua casella")
+            return 3
+        time.sleep(0.5)
+    print(f"messaggio {message['id']} da {message['from']} · posizione {entry['position']}")
+    print("---")
+    print(message["text"])
+    return 0
+
+
+def main():
+    commands = {"spawn": command_spawn, "recv": command_recv}
+    if len(sys.argv) < 2 or sys.argv[1] not in commands:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    return commands[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())
