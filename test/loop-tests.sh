@@ -142,6 +142,18 @@ kill_session() { # <session>: kills the process group of a script session, as a 
   kill -9 -- "-$(session_field "$1" pid)" 2>/dev/null
 }
 
+identity() { # <session>: "pid starttime" of its process as /proc says, or "gone"
+  python3 - "$ENGINE/bin" "$(session_field "$1" pid)" <<'PY2'
+import sys
+sys.path.insert(0, sys.argv[1])
+import loopstate
+try:
+    print(sys.argv[2], loopstate.start_time(int(sys.argv[2])))
+except OSError:
+    print("gone")
+PY2
+}
+
 forge() { # <from> <kind> [json fields]: a request file written by hand, as a session with Write could
   python3 - "$STATE/loop/requests" "$1" "$2" "${3:-{\}}" <<'PY'
 import json, sys, time, uuid
@@ -327,6 +339,47 @@ sleep 1
 verify "… switched on, it stays on" switch_is lead True
 verify "… no new halt" rows_are 2 event=halt position=lead
 stop_loop
+
+echo "loop: the loop dies, the sessions do not"
+new_state restart script
+start_loop
+"$LOOP" switch root on > /dev/null
+"$LOOP" switch lead on > /dev/null
+"$LOOP" spawn lead > /dev/null
+"$LOOP" spawn lead > /dev/null
+verify "three live sessions before the crash" wait_for 5 rows_are 3 event=spawn
+ROOT_BEFORE=$(identity root-1)
+LEAD_BEFORE=$(identity lead-1)
+"$LOOP" --cycle "$CYCLE" --no-notify > "$STATE/second.out" 2>&1
+verify "a second loop on the same state root → exit 2" test $? -eq 2
+verify "… it says that another loop runs" grep -q "another loop already runs" "$STATE/second.out"
+kill -9 "$LOOP_PID"
+wait "$LOOP_PID" 2>/dev/null
+LOOP_PID=
+verify "kill -9 of the loop: root-1 alive, same pid and starttime" test "$(identity root-1)" == "$ROOT_BEFORE"
+verify "… lead-1 alive, same pid and starttime" test "$(identity lead-1)" == "$LEAD_BEFORE"
+kill_session lead-2
+forge human switch '{"position": "root", "on": true}' > /dev/null
+SPAWNS=$(rows event=spawn)
+start_loop
+sleep 3
+verify "restart: a recovered row for root-1" rows_are 1 event=recovered session=root-1
+verify "… and for lead-1" rows_are 1 event=recovered session=lead-1
+verify "… lead-2, dead meanwhile, closed with reason dead-at-restart" \
+  rows_are 1 event=closed session=lead-2 reason=dead-at-restart
+verify "… 0 new spawns" rows_are "$SPAWNS" event=spawn
+verify "… the switch request deposited while it was down → rejected, stale" rows_are 1 event=rejected reason=stale
+verify "… every switch off" bash -c "! grep -q '\"on\": true' '$STATE/loop/switches.json'"
+verify "… the sessions untouched: same pid and starttime" \
+  bash -c "[[ '$(identity root-1)' == '$ROOT_BEFORE' && '$(identity lead-1)' == '$LEAD_BEFORE' ]]"
+message_for root root-1 "sleep 0"
+verify "an adopted session still reads what the new loop delivers" wait_for 5 rows_are 1 event=received session=root-1
+kill -TERM "$LOOP_PID"
+wait "$LOOP_PID" 2>/dev/null
+verify "SIGTERM: the loop exits with a stop row" rows_are 1 event=stop reason=sigterm
+verify "… and the sessions stay alive" bash -c "[[ '$(identity root-1)' == '$ROOT_BEFORE' && '$(identity lead-1)' == '$LEAD_BEFORE' ]]"
+LOOP_PID=
+kill_state "$STATE"
 
 echo "loop: from the root to the human"
 new_state root script

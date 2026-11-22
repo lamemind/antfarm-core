@@ -32,14 +32,23 @@ queue until a session of the position closes. A position whose sessions, alive a
 spent more than its budget goes back to neutral: switch off, live sessions stopped at once. It goes
 back on only after someone raises the budget in its grant; otherwise the loop switches it off again.
 
+The loop dies without killing its sessions, and a restart takes them back. An LLM session is a
+child of the Claude Code background service, not of the loop; a script session runs in a process
+session of its own. At every start the loop is in neutral again — it does not remember which
+switches were on —, adopts every session of its registry whose process is still alive, with a
+`recovered` row and no new spawn, marks closed the ones that died in the meantime, and rejects the
+switch requests deposited while it was down. A second loop on the same state root does not start.
+
 The loop rereads the grants at every cycle: a changed directory that validate-grants.py accepts
 takes effect without a restart; an invalid one does not stop the loop, which keeps the last valid
 set and writes the reason in the log. At start, invalid grants stop the loop with exit 2.
 
-Standard library only. Exits 0 on SIGTERM or SIGINT, 2 without a state root or with invalid grants.
+Standard library only. Exits 0 on SIGTERM or SIGINT, 2 without a state root, with invalid grants,
+or when another loop already runs on the same state root.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -108,6 +117,8 @@ class Loop:
         self.queued = {}
         self.received_logged = set()
         self.stopping = False
+        self.started = None
+        self.lock_file = None
 
     # <editor-fold defaultstate="collapsed" desc="Log">
     def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None):
@@ -694,9 +705,51 @@ class Loop:
         })
     # </editor-fold>
 
+    # <editor-fold defaultstate="collapsed" desc="Start and restart">
+    def take_lock(self):
+        """One loop per state root: an exclusive lock on loop/loop.lock, held for the whole life of
+        the process and released by the kernel when it dies, `kill -9` included. The children do
+        not inherit it: subprocess closes the descriptors it does not pass."""
+        self.lock_file = open(self.paths.lock, "a", encoding="utf-8")
+        try:
+            fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            other = (libstate.read_json(self.paths.status) or {}).get("pid")
+            print(f"another loop already runs on {self.paths.state} (pid {other}): this one does not start",
+                  file=sys.stderr)
+            raise SystemExit(2)
+
+    def adopt(self):
+        """The sessions of the registry that a previous loop left alive: a `recovered` row for each
+        one whose process still exists, untouched; the ones that died meanwhile are marked closed."""
+        changed = False
+        for session_id, entry in self.sessions().items():
+            if entry["status"] != "alive":
+                continue
+            if libstate.alive(entry["pid"], entry["starttime"]):
+                self.log("recovered", position=entry["position"], session=session_id,
+                         detail=f"{entry['type']} pid {entry['pid']}, launched {entry['launched']}")
+                continue
+            entry.update(status="closed", closed=libstate.now(), close_reason="dead-at-restart")
+            changed = True
+            self.log("closed", position=entry["position"], session=session_id, reason="dead-at-restart",
+                     detail=f"pid {entry['pid']}")
+        if changed:
+            self.save_registry()
+
+    def reject_stale_switches(self):
+        """A switch request deposited while the loop was down would turn a position on at restart:
+        the loop starts in neutral, so it rejects them. The other pending requests stay: the
+        switches are all off, and they wait in the queue."""
+        for path in libstate.entry_files(self.paths.requests):
+            request = libstate.read_json(path)
+            if request is not None and request.get("kind") == "switch":
+                self.reject(path, request, "stale", "depositata prima dell'avvio del loop, che riparte in folle")
+
     def start(self):
         for directory in (self.paths.requests_done, self.paths.mailboxes, self.paths.work, self.paths.records):
             directory.mkdir(parents=True, exist_ok=True)
+        self.take_lock()
         if not self.paths.grants.is_dir():
             print(f"no grants directory: {self.paths.grants}", file=sys.stderr)
             raise SystemExit(2)
@@ -707,7 +760,9 @@ class Loop:
         self.switches = {position: {"on": False, "since": self.started, "reason": "start"} for position in self.grants}
         self.save_switches()
         self.received_logged = {path.name for path in self.paths.mailboxes.glob("*/received/[0-9]*.json")}
-        self.reap()
+        self.adopt()
+        self.reject_stale_switches()
+    # </editor-fold>
 
     def cycle(self):
         self.reload_grants()
