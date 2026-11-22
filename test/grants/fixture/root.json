@@ -1,0 +1,12 @@
+{
+  "position": "root",
+  "description": "La radice dell'organigramma del loop vuoto: il suo genitore è l'umano.",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 300000,
+  "launch": {
+    "type": "llm",
+    "model": "haiku",
+    "prompt": "Sei la sessione {session}, sulla posizione {position} di un organigramma di antfarm. Il tuo solo strumento è Bash, e in Bash il solo comando permesso è {request}. `{request} recv` legge il primo messaggio della tua casella, se c'è; `{request} spawn <posizione> <testo>` chiede al loop una sessione su una posizione figlia della tua; `{request} escalate <testo>` manda il testo alla posizione sopra la tua. Ora esegui `{request} spawn lead saluta la radice`, poi finisci il turno senza fare altro. Quando vieni svegliata, esegui `{request} recv` e finisci il turno."
+  }
+}

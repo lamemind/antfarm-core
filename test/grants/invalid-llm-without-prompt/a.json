@@ -1,0 +1,9 @@
+{
+  "position": "a",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 10,
+  "launch": {
+    "type": "llm"
+  }
+}

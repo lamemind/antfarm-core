@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "antfarm/grant.schema.json",
+  "title": "Grant of a position of the loop, version 0",
+  "description": "One file per position, <state>/grants/<position>.json. Whoever configures the project writes it; the loop only reads it. The switch of a position is not here: it is state of the loop. validate-grants.py checks what the schema does not express: the file name equals the position, no position is called `human`, exactly one root, every parent exists, no cycle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["position", "parent", "max_sessions", "budget_tokens", "launch"],
+  "properties": {
+    "position": {
+      "description": "The id of the position; equal to the file name without `.json`.",
+      "$ref": "#/$defs/id"
+    },
+    "parent": {
+      "description": "The position that receives the escalations of this one, and that can ask spawns on it. `human` for the root: an escalation from the root becomes an interpellation of the human.",
+      "$ref": "#/$defs/id"
+    },
+    "description": {"type": "string"},
+    "max_sessions": {
+      "description": "How many sessions of this position can be alive at the same time. A spawn over the cap waits in the queue.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "budget_tokens": {
+      "description": "The tokens that all the sessions of the position, alive and closed, can spend together. Over the budget the loop switches the position off and stops its sessions.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "launch": {"$ref": "#/$defs/launch"}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$"
+    },
+    "launch": {
+      "description": "How the loop launches a session of the position. An absent field takes the most closed value: safe mode on, Bash only, in Bash only the request command, dontAsk, an empty directory under the state root. In `prompt` and `command` the loop replaces {request}, {code}, {state}, {session} and {position}.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "description": "llm: a background Claude Code session · script: a local process, for the tests",
+          "enum": ["llm", "script"]
+        },
+        "prompt": {"description": "Only llm: the launch prompt.", "type": "string", "minLength": 1},
+        "command": {
+          "description": "Only script: the command line of the process.",
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "safe_mode": {"description": "Only llm. Default true.", "type": "boolean"},
+        "tools": {
+          "description": "Only llm: the built-in tools of the session. Default [\"Bash\"]; [] for none.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "allowed_tools": {
+          "description": "Only llm: the permission rules allowed without asking. Default [\"Bash(<request command> *)\"].",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "permission_mode": {
+          "description": "Only llm. Default dontAsk.",
+          "enum": ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]
+        },
+        "model": {"description": "Only llm. Default: the default model of Claude Code.", "type": "string", "minLength": 1},
+        "cwd": {
+          "description": "The working directory of the sessions; relative to the state root. Default: an empty directory per session under <state>/loop/work/.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "if": {"properties": {"type": {"const": "script"}}, "required": ["type"]},
+      "then": {
+        "required": ["command"],
+        "properties": {
+          "prompt": false, "safe_mode": false, "tools": false, "allowed_tools": false,
+          "permission_mode": false, "model": false
+        }
+      },
+      "else": {
+        "required": ["prompt"],
+        "properties": {"command": false}
+      }
+    }
+  }
+}

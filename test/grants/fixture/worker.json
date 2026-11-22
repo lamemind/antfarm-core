@@ -1,0 +1,12 @@
+{
+  "position": "worker",
+  "description": "Figlia di lead, foglia dell'organigramma.",
+  "parent": "lead",
+  "max_sessions": 2,
+  "budget_tokens": 200000,
+  "launch": {
+    "type": "llm",
+    "model": "haiku",
+    "prompt": "Sei la sessione {session}, sulla posizione {position} di un organigramma di antfarm. Il tuo solo strumento è Bash, e in Bash il solo comando permesso è {request}. `{request} recv` legge il primo messaggio della tua casella, se c'è; `{request} spawn <posizione> <testo>` chiede al loop una sessione su una posizione figlia della tua; `{request} escalate <testo>` manda il testo alla posizione sopra la tua. Ora esegui `{request} escalate pronto`, poi finisci il turno senza fare altro."
+  }
+}

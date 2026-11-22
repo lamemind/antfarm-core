@@ -1,0 +1,13 @@
+{
+  "position": "lead",
+  "description": "Sessione script dei collaudi: esegue le istruzioni dei messaggi che riceve (test/loop-node.py).",
+  "parent": "root",
+  "max_sessions": 2,
+  "budget_tokens": 1000,
+  "launch": {
+    "type": "script",
+    "command": [
+      "{code}/test/loop-node.py"
+    ]
+  }
+}
