@@ -3,6 +3,12 @@
 
     request spawn <position> [text...]   asks a session on a child position of its own; the text,
                                          if any, becomes the first message of the new session
+    request escalate [package] [text...] sends the text to the mailbox of the parent position; from
+                                         the root it becomes an interpellation of the human, and
+                                         then the package must carry alternatives, recommendation
+                                         and default. Package: --blocked <t> --alternative <t>
+                                         (repeatable) --evidence <t> --recommendation <t>
+                                         --waiting-cost <t> --default <t> --deadline <t>
     request recv [--wait <seconds>]      the oldest message of its mailbox addressed to it;
                                          without --wait it does not wait
 
@@ -11,8 +17,8 @@ No command accepts the sender. The command derives it from the process ancestry:
 marks alive is the caller. A caller that no live session explains is rejected with
 `unknown-sender`.
 
-The command decides nothing: `spawn` deposits a request file, the loop accepts, queues or rejects
-it and writes it in its log. The command waits a few seconds for the decision and prints it.
+The command decides nothing: `spawn` and `escalate` deposit a request file, the loop accepts,
+queues or rejects it and writes it in its log. The command waits a few seconds for the decision and prints it.
 `recv` reads the mailbox directly: the loop has already put the message there and addressed it.
 
 The texts this command prints reach the LLM sessions, and stay in Italian.
@@ -21,6 +27,7 @@ loop rejects the request or the caller is unknown; 2 on wrong usage or without a
 3 if recv finds nothing within the wait.
 """
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -56,6 +63,41 @@ def command_spawn(args):
     return libstate.exit_code(state)
 
 
+PACKAGE_OPTIONS = (
+    ("--blocked", "blocked", "cosa ti blocca"),
+    ("--evidence", "evidence", "le prove che porti"),
+    ("--recommendation", "recommendation", "l'alternativa che raccomandi"),
+    ("--waiting-cost", "waiting_cost", "quanto costa aspettare la risposta"),
+    ("--default", "default", "cosa succede se nessuno risponde"),
+    ("--deadline", "deadline", "entro quando serve la risposta"),
+)
+
+
+def command_escalate(args):
+    parser = argparse.ArgumentParser(prog="request escalate", description="Manda il testo alla posizione sopra la tua.")
+    for option, field, description in PACKAGE_OPTIONS:
+        parser.add_argument(option, dest=field, help=description)
+    parser.add_argument("--alternative", dest="alternatives", action="append", help="un'alternativa (ripetibile)")
+    parser.add_argument("text", nargs="*")
+    parsed = parser.parse_args(args)
+    package = {field: getattr(parsed, field) for _, field, _ in PACKAGE_OPTIONS}
+    package["alternatives"] = parsed.alternatives
+    package = {field: value for field, value in package.items() if value}
+    found = caller()
+    if found is None:
+        return 1
+    session_id, _ = found
+    request_id = libstate.deposit_request(PATHS, session_id, "escalate", text=" ".join(parsed.text).strip(), package=package)
+    state = libstate.wait_for_decision(PATHS, request_id, DECISION_WAIT_S)
+    print(f"richiesta {request_id} · escalate: {libstate.describe_decision(state)}")
+    return libstate.exit_code(state)
+
+
+PACKAGE_LABELS = {"blocked": "bloccato su", "alternatives": "alternative", "evidence": "prove",
+                  "recommendation": "raccomandazione", "waiting_cost": "costo dell'attesa",
+                  "default": "default", "deadline": "scadenza"}
+
+
 def command_recv(args):
     wait = 0
     if args[:1] == ["--wait"] and len(args) == 2 and args[1].isdigit():
@@ -69,6 +111,11 @@ def command_recv(args):
     session_id, entry = found
     limit = time.monotonic() + wait
     while True:
+        # A session stopped while it waits here would leave this process orphaned, and the orphan
+        # would take a message that the session can no longer read: it stops with its session.
+        if not libstate.alive(entry["pid"], entry["starttime"]):
+            print(f"rifiutato: session-closed — la sessione {session_id} non è più viva", file=sys.stderr)
+            return 1
         message = libstate.take_message(PATHS, entry["position"], session_id)
         if message is not None:
             break
@@ -76,14 +123,17 @@ def command_recv(args):
             print("nessun messaggio nella tua casella")
             return 3
         time.sleep(0.5)
-    print(f"messaggio {message['id']} da {message['from']} · posizione {entry['position']}")
+    kind = " · escalation" if message.get("kind") == "escalation" else ""
+    print(f"messaggio {message['id']} da {message['from']}{kind} · posizione {entry['position']}")
     print("---")
     print(message["text"])
+    for field, value in (message.get("package") or {}).items():
+        print(f"— {PACKAGE_LABELS.get(field, field)}: {' · '.join(value) if isinstance(value, list) else value}")
     return 0
 
 
 def main():
-    commands = {"spawn": command_spawn, "recv": command_recv}
+    commands = {"spawn": command_spawn, "escalate": command_escalate, "recv": command_recv}
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
         print(__doc__.strip(), file=sys.stderr)
         return 2

@@ -128,17 +128,28 @@ def wait_for_decision(paths, request_id, wait_s):
         time.sleep(POLLING_STEP_S)
 
 
+# What a decided request means for whoever deposited it, in Italian: these texts reach the LLM sessions.
+OUTCOME_TEXTS = {
+    "applied": "applicata",
+    "spawned": "accettata: sessione {session} lanciata",
+    "deposited": "consegnata alla casella di {position}: il loop la recapita a una sessione per regola",
+    "interpellation": "salita all'umano come interpellazione {interpellation}",
+    "halted": "applicata, ma la posizione ha superato il budget ed è tornata in folle",
+    "failed": "fallita: {detail}",
+}
+
+
 def describe_decision(state):
-    """One line in Italian for whoever deposited the request: these texts reach the LLM sessions."""
+    """One line in Italian for whoever deposited the request."""
     if state is None:
         return "richiesta sparita: nessun file fra le pendenti né fra le decise"
     if state.get("outcome") == "rejected":
         return f"rifiutata: {state['reason']} — {state.get('detail') or ''}".rstrip(" —")
     if state.get("outcome"):
-        session = f" · sessione {state['session']}" if state.get("session") else ""
-        return f"{state['outcome']}{session}"
+        template = OUTCOME_TEXTS.get(state["outcome"], state["outcome"])
+        return template.format_map({key: state.get(key) or "" for key in ("session", "position", "interpellation", "detail")})
     if state.get("queued"):
-        return f"in coda: {state['queued']['reason']} — il loop la esegue quando può"
+        return f"in coda: {state['queued']['reason']} — {state['queued']['detail']}; il loop la esegue quando può"
     return "depositata: il loop non l'ha ancora letta; l'esito sarà nel log del loop"
 
 

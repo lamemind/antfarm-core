@@ -6,6 +6,7 @@
 # It runs on a copy of bin/, schema/ and test/ in a temporary folder, with the state root
 # (ANTFARM_STATE_DIR) pointed at a sibling folder of the copy: grants, requests, mailboxes, sessions
 # and the loop log are its own, and the registry of a project receives no test rows.
+# LOOP_TESTS_KEEP=1 keeps the temporary folder, with the log of every scenario, for whoever debugs.
 # Exits 1 if a test fails.
 set -uo pipefail
 
@@ -44,7 +45,11 @@ cleanup() {
   for state in "$TMP"/state-*; do
     [[ -d $state ]] && kill_state "$state"
   done
-  rm -rf "$TMP"
+  if [[ -n ${LOOP_TESTS_KEEP:-} ]]; then
+    echo "LOOP_TESTS_KEEP: the temporary folder stays in $TMP"
+  else
+    rm -rf "$TMP"
+  fi
 }
 trap cleanup EXIT
 
@@ -74,7 +79,7 @@ new_state() { # <name> <grants set>: a state root with a copy of the grants; set
 }
 
 start_loop() { # starts the loop on $STATE in the background and waits for its first status
-  "$LOOP" --cycle "$CYCLE" > "$STATE/loop.out" 2>&1 &
+  "$LOOP" --cycle "$CYCLE" --no-notify > "$STATE/loop.out" 2>&1 &
   LOOP_PID=$!
   wait_for 15 test -f "$STATE/loop/status.json"
 }
@@ -122,6 +127,19 @@ session_alive() { # <session>: the registry marks it alive and its process exist
 switch_is() { # <position> <True|False>
   [[ $(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]['on'])" \
        "$STATE/loop/switches.json" "$1") == "$2" ]]
+}
+
+message_for() { # <position> <session> <text>: a message addressed to a session, as a test deposits it
+  python3 - "$ENGINE/bin" "$STATE" "$1" "$2" "$3" <<'PY2'
+import sys
+sys.path.insert(0, sys.argv[1])
+import loopstate
+loopstate.deposit_message(loopstate.Paths(sys.argv[2]), sys.argv[3], "human", sys.argv[5], to_session=sys.argv[4])
+PY2
+}
+
+kill_session() { # <session>: kills the process group of a script session, as a crash would
+  kill -9 -- "-$(session_field "$1" pid)" 2>/dev/null
 }
 
 forge() { # <from> <kind> [json fields]: a request file written by hand, as a session with Write could
@@ -233,6 +251,107 @@ verify "removing a position with live sessions → grants-rejected" \
 verify "… worker is still a position" python3 -c \
   "import json, sys; assert 'worker' in json.load(open(sys.argv[1]))['positions']" "$STATE/loop/status.json"
 mv "$TMP/worker.json" "$STATE/grants/worker.json"
+stop_loop
+
+echo "loop: delivery of an escalation"
+new_state deliver script
+start_loop
+"$LOOP" switch lead on > /dev/null
+"$LOOP" switch worker on > /dev/null
+"$LOOP" spawn lead "spawn worker escalate uno|exit" > /dev/null
+verify "launcher alive → delivered to it (lead-1), rule launcher" \
+  wait_for 10 rows_are 1 event=deliver position=lead session=lead-1 reason=launcher
+verify "… lead-1 reads it" wait_for 5 rows_are 2 event=received session=lead-1
+"$LOOP" spawn lead "spawn worker sleep 2|escalate due|exit
+exit" > /dev/null
+verify "… the launcher lead-2 exits before the escalation" wait_for 10 rows_are 1 event=closed session=lead-2
+verify "launcher dead, another live session → delivered to lead-1, rule alive-session" \
+  wait_for 10 rows_are 1 event=deliver position=lead session=lead-1 reason=alive-session
+verify "… lead-1 reads it" wait_for 5 rows_are 3 event=received session=lead-1
+kill_session lead-1
+verify "… lead-1 dies" wait_for 5 rows_are 1 event=closed session=lead-1
+"$LOOP" spawn worker "escalate tre|exit" > /dev/null
+verify "no live session → the loop spawns lead-3, reason escalation" \
+  wait_for 10 rows_are 1 event=spawn position=lead session=lead-3 reason=escalation
+verify "… delivered to lead-3, rule spawn" rows_are 1 event=deliver position=lead session=lead-3 reason=spawn
+verify "… lead-3 reads it" wait_for 5 rows_are 1 event=received session=lead-3
+message_for lead lead-2 "per una sessione chiusa"
+verify "a message for a closed session → undelivered, then delivered to a live one" \
+  wait_for 5 rows_are 1 event=undelivered session=lead-2 reason=session-closed
+verify "… to lead-3, rule alive-session" wait_for 5 rows_are 1 event=deliver session=lead-3 reason=alive-session
+"$LOOP" switch lead off > /dev/null
+"$LOOP" spawn worker "escalate quattro|exit" > /dev/null
+verify "escalation toward a position switched off → held in the mailbox" \
+  wait_for 10 rows_are 1 event=held position=lead reason=switched-off
+"$LOOP" switch lead on > /dev/null
+verify "… delivered when it is switched on" wait_for 5 rows_are 2 event=deliver session=lead-3 reason=alive-session
+forge human escalate '{"text": "dall'"'"'umano"}' > /dev/null
+verify "an escalation from the human → rejected, not-a-session" wait_for 5 rows_are 1 event=rejected reason=not-a-session
+stop_loop
+
+echo "loop: cap"
+new_state cap script
+start_loop
+"$LOOP" switch lead on > /dev/null
+for _ in 1 2 3; do "$LOOP" spawn lead > /dev/null; done
+verify "three spawns on lead with cap 2 → two spawn rows" wait_for 5 rows_are 2 event=spawn position=lead
+verify "… the third queued, reason cap" rows_are 1 event=queued position=lead reason=cap
+verify "… two live sessions" bash -c "session_alive() { :; }; [[ \$(python3 -c \"import json; print(sum(1 for e in json.load(open('$STATE/loop/sessions.json'))['sessions'].values() if e['position'] == 'lead' and e['status'] == 'alive'))\") -eq 2 ]]"
+kill_session lead-1
+verify "a session closes → the queued spawn runs" wait_for 10 rows_are 3 event=spawn position=lead
+stop_loop
+
+echo "loop: budget"
+new_state budget script
+start_loop
+"$LOOP" switch lead on > /dev/null
+"$LOOP" spawn lead "spend 600" > /dev/null
+"$LOOP" spawn lead "spend 600" > /dev/null
+verify "1200 tokens over a budget of 1000 → halt row, reason budget" \
+  wait_for 10 rows_are 1 event=halt position=lead reason=budget
+verify "… the switch of lead is off" switch_is lead False
+verify "… both sessions closed at once, reason halt-budget" \
+  wait_for 3 rows_are 2 event=closed position=lead reason=halt-budget
+verify "… and their processes are gone" bash -c "! kill -0 $(session_field lead-1 pid) 2>/dev/null && ! kill -0 $(session_field lead-2 pid) 2>/dev/null"
+"$LOOP" switch lead on > /dev/null
+verify "switched on again with the same budget → halted again" rows_are 2 event=halt position=lead reason=budget
+verify "… the switch stays off" switch_is lead False
+python3 - "$STATE/grants/lead.json" <<'PY2'
+import json, sys
+grant = json.load(open(sys.argv[1])); grant["budget_tokens"] = 5000
+open(sys.argv[1], "w").write(json.dumps(grant))
+PY2
+verify "the budget raised in the grant → grants-loaded" wait_for 10 rows_are 2 event=grants-loaded
+"$LOOP" switch lead on > /dev/null
+sleep 1
+verify "… switched on, it stays on" switch_is lead True
+verify "… no new halt" rows_are 2 event=halt position=lead
+stop_loop
+
+echo "loop: from the root to the human"
+new_state root script
+start_loop
+"$LOOP" switch root on > /dev/null
+verify "root-1 spawned by the switch" wait_for 5 rows_are 1 event=spawn session=root-1
+message_for root root-1 "escalate senza pacchetto
+escalate
+escalate --blocked 'manca una scelta' --alternative A --alternative B --recommendation A --default A --deadline domani scegliere fra A e B"
+verify "escalation from the root without the package → rejected, incomplete-package" \
+  wait_for 10 rows_are 1 event=rejected from=root-1 reason=incomplete-package
+verify "an empty escalation → rejected, empty" wait_for 10 rows_are 1 event=rejected from=root-1 reason=empty
+verify "with alternatives, recommendation and default → an interpellation row" \
+  wait_for 10 rows_are 1 event=interpellation position=root session=root-1
+verify "… the file carries the package and stays open" python3 - "$STATE/loop/interpellations" <<'PY2'
+import json, sys
+from pathlib import Path
+[path] = Path(sys.argv[1]).glob("[0-9]*.json")
+data = json.loads(path.read_text())
+assert data["alternatives"] == ["A", "B"] and data["recommendation"] == "A" and data["default"] == "A", data
+assert data["deadline"] == "domani" and data["blocked"] == "manca una scelta" and data["status"] == "open", data
+PY2
+verify "… no session opens for it: one spawn row in all" rows_are 1 event=spawn
+verify "… the status counts it" python3 -c \
+  "import json, sys; assert json.load(open(sys.argv[1]))['interpellations_open'] == 1" "$STATE/loop/status.json"
 stop_loop
 
 echo

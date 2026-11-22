@@ -2,7 +2,7 @@
 """The loop of antfarm: one process per project that launches sessions on the positions of an org
 chart, wakes them, and executes their requests.
 
-    ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py [run] [--cycle <s>]
+    ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py [run] [--cycle <s>] [--no-notify]
         the loop process: it runs in a terminal window and prints its log there
     ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py switch <position> on|off
     ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py spawn <position> [text...]
@@ -20,6 +20,17 @@ the flags of the launch template of its grant. The loop wakes it when a message 
 its mailbox and the session has ended its turn: `claude stop`, then `claude --bg --resume` without
 flags, which continues the same session with the options saved at launch. A session of type script
 is a local process, for the tests.
+
+An escalation goes to the mailbox of the parent position, and the loop delivers it by rule: to the
+session that launched whoever escalates, if it is alive; else to another live session of the
+position; else to a new session it spawns. From the root, whose parent is the human, an escalation
+opens no session: it becomes an interpellation, a file under loop/interpellations/ and a desktop
+notification, and it needs alternatives, recommendation and default.
+
+A position has a cap of live sessions and a budget of tokens. A spawn over the cap waits in the
+queue until a session of the position closes. A position whose sessions, alive and closed, have
+spent more than its budget goes back to neutral: switch off, live sessions stopped at once. It goes
+back on only after someone raises the budget in its grant; otherwise the loop switches it off again.
 
 The loop rereads the grants at every cycle: a changed directory that validate-grants.py accepts
 takes effect without a restart; an invalid one does not stop the loop, which keeps the last valid
@@ -43,6 +54,7 @@ import graph as libgraph  # noqa: E402
 import grants as libgrants  # noqa: E402
 import loopstate as libstate  # noqa: E402
 import match as libmatch  # noqa: E402
+import observe as libobserve  # noqa: E402
 
 CODE_ROOT = libgraph.code_root()
 STATE_ROOT = libmatch.STATE_ROOT
@@ -63,6 +75,12 @@ STOP_WAIT_S = 30
 DECISION_WAIT_S = 5
 # The one line the loop writes into a session it wakes; it reaches an LLM, so it is in Italian.
 WAKE_TEXT = "Il loop ti sveglia: nella tua casella c'è un messaggio per te. Leggilo con `{request} recv`."
+# The package of an escalation; from the root, the first three are required (the interpellation of
+# the vision of factory: «senza il default è un blocco mascherato»).
+REQUIRED_PACKAGE = ("alternatives", "recommendation", "default")
+PACKAGE_FIELDS = ("blocked", "alternatives", "evidence", "recommendation", "waiting_cost", "default", "deadline")
+SCRIPT_TOKENS = "tokens.txt"
+HALT_WAIT_S = 5
 
 
 class LaunchError(Exception):
@@ -74,9 +92,13 @@ def launch_environment():
 
 
 class Loop:
-    def __init__(self, paths, cycle_s):
+    def __init__(self, paths, cycle_s, notify=True):
         self.paths = paths
         self.cycle_s = cycle_s
+        self.notify = notify
+        self.held = {}
+        self.transcripts = {}
+        self.token_cache = {}
         self.grants = {}
         self.fingerprint = None
         self.rejected_fingerprint = None
@@ -184,10 +206,12 @@ class Loop:
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Spawn">
-    def spawn(self, position, launched_by, request_id, reason, text=None):
+    def spawn(self, position, launched_by, request_id, reason, text=None, waiting=None):
         """Launches a session on the position and registers it; returns its id, or None if the
         launch fails. A text becomes the first message of the session, in the position mailbox,
-        before the launch: the session finds it at its first `request recv`."""
+        and `waiting` — (path, message) of a message already in the mailbox — is addressed to it:
+        both before the launch, so that the session finds them at its first `request recv`. If the
+        launch fails the text disappears and the waiting message goes back unassigned."""
         session_id = self.next_session_id(position)
         values = {"request": REQUEST, "code": CODE_ROOT, "state": self.paths.state,
                   "session": session_id, "position": position}
@@ -199,6 +223,9 @@ class Loop:
         if text:
             message = libstate.deposit_message(self.paths, position, launched_by.get("session") or HUMAN, text,
                                                to_session=session_id)
+        if waiting is not None:
+            waiting[1].update(to_session=session_id, delivered=libstate.now(), rule="spawn")
+            libstate.write_json(waiting[0], waiting[1])
         try:
             launched = self.launch_llm(session_id, position, launch, records) if launch["type"] == "llm" \
                 else self.launch_script(session_id, launch, records)
@@ -206,6 +233,11 @@ class Loop:
             if message is not None:
                 for path in self.paths.mailbox(position).glob(f"[0-9]*-{message['id']}.json"):
                     path.unlink(missing_ok=True)
+            if waiting is not None:
+                for field in ("to_session", "delivered", "rule"):
+                    waiting[1].pop(field, None)
+                waiting[1]["to_session"] = None
+                libstate.write_json(waiting[0], waiting[1])
             self.log("spawn-failed", position=position, session=session_id, request=request_id,
                      sender=launched_by.get("session") or launched_by["kind"], reason=reason, detail=str(error))
             return None
@@ -317,7 +349,7 @@ class Loop:
             if sender_entry is None or sender_entry["status"] != "alive":
                 self.reject(path, request, "unknown-sender", f"{sender} non è una sessione viva del loop")
                 return
-        handlers = {"switch": self.request_switch, "spawn": self.request_spawn}
+        handlers = {"switch": self.request_switch, "spawn": self.request_spawn, "escalate": self.request_escalate}
         handler = handlers.get(request.get("kind"))
         if handler is None:
             self.reject(path, request, "unknown-kind", f"il loop non conosce il tipo di richiesta {request.get('kind')!r}")
@@ -337,6 +369,9 @@ class Loop:
         on = bool(request.get("on"))
         self.set_switch(position, on, "human")
         self.log("switch-on" if on else "switch-off", position=position, request=request["id"], sender=HUMAN)
+        if on and self.over_budget(position):
+            self.finish(path, request, "halted")
+            return
         spawned = None
         if on and self.grants[position]["parent"] == HUMAN and not self.alive_sessions(position):
             spawned = self.spawn(position, {"kind": HUMAN, "session": None}, request["id"], "switch")
@@ -344,7 +379,8 @@ class Loop:
 
     def request_spawn(self, path, request, sender_entry):
         """The human asks a spawn on any declared position, a session only on a child position of
-        its own. A spawn on a position switched off waits in the queue."""
+        its own. A spawn on a position switched off, or with as many live sessions as its cap,
+        waits in the queue: the loop retries it at every cycle."""
         position = request.get("position")
         if position not in self.grants:
             self.reject(path, request, "undeclared-position", f"{position} non è una posizione dell'organigramma")
@@ -356,12 +392,203 @@ class Loop:
         if not self.is_on(position):
             self.queue(path, request, "switched-off", f"l'interruttore di {position} è spento")
             return
+        alive = len(self.alive_sessions(position))
+        if alive >= self.grants[position]["max_sessions"]:
+            self.queue(path, request, "cap", f"{position} ha già {alive} sessioni vive, il tetto è {self.grants[position]['max_sessions']}")
+            return
         launched_by = {"kind": "session", "session": request["from"]} if sender_entry else {"kind": HUMAN, "session": None}
         spawned = self.spawn(position, launched_by, request["id"], "request", text=request.get("text"))
         if spawned is None:
             self.finish(path, request, "failed", reason="launch-failed", detail="il lancio è fallito: il motivo è nel log del loop")
             return
         self.finish(path, request, "spawned", session=spawned)
+
+    def request_escalate(self, path, request, sender_entry):
+        """The text goes to the mailbox of the parent position, unassigned: `deliver` picks the
+        session. From the root it becomes an interpellation of the human."""
+        if sender_entry is None:
+            self.reject(path, request, "not-a-session", "l'umano non scala: è il genitore della radice")
+            return
+        text = (request.get("text") or "").strip()
+        package = {field: value for field, value in (request.get("package") or {}).items() if value}
+        if not text and not package:
+            self.reject(path, request, "empty", "niente da scalare: né testo né pacchetto")
+            return
+        position = sender_entry["position"]
+        parent = self.grants[position]["parent"]
+        if parent == HUMAN:
+            self.interpellate(path, request, sender_entry, text, package)
+            return
+        message = libstate.deposit_message(self.paths, parent, request["from"], text, kind="escalation",
+                                           launcher=sender_entry["launched_by"].get("session"),
+                                           request=request["id"], package=package or None)
+        self.log("escalate", position=parent, session=request["from"], request=request["id"], sender=request["from"],
+                 detail=f"{message['id']} from {position}")
+        self.finish(path, request, "deposited", position=parent, message=message["id"])
+
+    def interpellate(self, path, request, sender_entry, text, package):
+        """An escalation from the root opens no session: it becomes a file for the human, with a
+        desktop notification. Without alternatives, recommendation and default it is rejected: an
+        interpellation without a default is a block in disguise. Default and deadline stay written
+        in the file; nobody executes them."""
+        missing = [field for field in REQUIRED_PACKAGE if not package.get(field)]
+        if missing:
+            self.reject(path, request, "incomplete-package",
+                        "dalla radice un'escalation sale all'umano solo con alternative, raccomandazione e default: "
+                        f"mancano {', '.join(missing)}")
+            return
+        interpellation = {"id": libstate.new_id("i"), "ts": libstate.now(), "from": request["from"],
+                          "position": sender_entry["position"], "request": request["id"], "text": text,
+                          **{field: package.get(field) for field in PACKAGE_FIELDS}, "status": "open"}
+        libstate.deposit(self.paths.interpellations, interpellation)
+        notified = self.notify_human(interpellation)
+        self.log("interpellation", position=sender_entry["position"], session=request["from"], request=request["id"],
+                 sender=request["from"], detail=f"{interpellation['id']} · notify {notified}")
+        self.finish(path, request, "interpellation", interpellation=interpellation["id"])
+
+    def notify_human(self, interpellation):
+        """A desktop notification outside the view (`notify-send`); returns how it went."""
+        if not self.notify:
+            return "off"
+        body = interpellation["blocked"] or interpellation["text"] or ""
+        body += f"\nraccomandazione: {interpellation['recommendation']} · default: {interpellation['default']}"
+        try:
+            outcome = subprocess.run(["notify-send", "--app-name=antfarm",
+                                      f"antfarm · interpellazione da {interpellation['position']}", body],
+                                     capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return f"failed: {error}"
+        return "sent" if outcome.returncode == 0 else f"failed: exit {outcome.returncode} {outcome.stderr.strip()}"
+    # </editor-fold>
+
+    # <editor-fold defaultstate="collapsed" desc="Delivery">
+    def deliver(self):
+        """Assigns every unassigned message of every mailbox, oldest first. A message addressed to a
+        session that closed without reading it goes back to the position and is assigned again."""
+        changed = False
+        for position in sorted(self.grants):
+            for path, message in libstate.pending_messages(self.paths, position):
+                target = message.get("to_session")
+                if target is not None:
+                    entry = self.sessions().get(target)
+                    if entry is not None and entry["status"] == "alive":
+                        continue
+                    message["to_session"] = None
+                    message["undelivered"] = [*message.get("undelivered", []), target]
+                    libstate.write_json(path, message)
+                    self.log("undelivered", position=position, session=target, sender=message.get("from"),
+                             reason="session-closed", detail=message["id"])
+                changed = self.assign(path, message, position) or changed
+        return changed
+
+    def assign(self, path, message, position):
+        """The rule of delivery: to the session that launched whoever escalates, if it is alive;
+        else to the first live session of the position; else to a new session. On a position
+        switched off the message stays in the mailbox, and so it does when the launch fails."""
+        if not self.is_on(position):
+            self.hold(message, position, "switched-off", f"the switch of {position} is off")
+            return False
+        alive = self.alive_sessions(position)
+        launcher = message.get("launcher")
+        if launcher in alive or alive:
+            target, rule = (launcher, "launcher") if launcher in alive else (alive[0], "alive-session")
+            message.update(to_session=target, delivered=libstate.now(), rule=rule)
+            libstate.write_json(path, message)
+        else:
+            target, rule = self.spawn(position, {"kind": "loop", "session": None}, message.get("request"), "escalation",
+                                      waiting=(path, message)), "spawn"
+            if target is None:
+                self.hold(message, position, "launch-failed", "the launch of a session for the message failed")
+                return False
+        self.held.pop(message["id"], None)
+        self.log("deliver", position=position, session=target, sender=message.get("from"), reason=rule, detail=message["id"])
+        return True
+
+    def hold(self, message, position, reason, detail):
+        """The message stays in the mailbox; the row is written once per reason."""
+        if self.held.get(message["id"]) == reason:
+            return
+        self.held[message["id"]] = reason
+        self.log("held", position=position, sender=message.get("from"), reason=reason, detail=f"{message['id']}: {detail}")
+    # </editor-fold>
+
+    # <editor-fold defaultstate="collapsed" desc="Budget and neutral">
+    def session_tokens(self, entry):
+        """The tokens a session has spent: for an LLM session the four `usage` fields of its
+        transcript, each `message.id` counted once (observe.py); for a script session the number
+        it writes in tokens.txt of its working directory."""
+        if entry["type"] == "script":
+            try:
+                return int((Path(entry["cwd"]) / SCRIPT_TOKENS).read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                return 0
+        session_id = entry["sessionId"]
+        if session_id not in self.transcripts:
+            path = libmatch.transcript(session_id)
+            if path is None:
+                return 0
+            self.transcripts[session_id] = path
+        path = self.transcripts[session_id]
+        try:
+            status = path.stat()
+        except OSError:
+            return 0
+        key = (status.st_size, status.st_mtime_ns)
+        cached = self.token_cache.get(session_id)
+        if cached is None or cached[0] != key:
+            tokens = libobserve.measure_session(entry["id"], {"sessionId": session_id}, None)["token"]
+            self.token_cache[session_id] = cached = (key, tokens)
+        return cached[1]
+
+    def consumption(self, position):
+        """The tokens of all the sessions of the position, alive and closed."""
+        return sum(self.session_tokens(entry) for entry in self.sessions().values() if entry["position"] == position)
+
+    def over_budget(self, position):
+        """True, and the position back in neutral, if its sessions have spent more than its budget."""
+        spent = self.consumption(position)
+        budget = self.grants[position]["budget_tokens"]
+        if spent <= budget:
+            return False
+        self.halt(position, "budget", f"{spent} tokens spent, budget {budget}")
+        return True
+
+    def account(self):
+        for position in sorted(self.grants):
+            if self.is_on(position):
+                self.over_budget(position)
+
+    def halt(self, position, reason, detail):
+        """Back to neutral for one position: switch off, and its live sessions stopped at once. The
+        one function for every trigger: today the budget, tomorrow an algedonic signal."""
+        self.set_switch(position, False, reason)
+        self.log("halt", position=position, reason=reason, detail=detail)
+        for session_id in self.alive_sessions(position):
+            self.stop_session(session_id, f"halt-{reason}")
+
+    def stop_session(self, session_id, reason):
+        """Stops a session now: `claude stop` for an LLM session, SIGTERM to the process group of a
+        script session — its `request recv` too, which would otherwise outlive it."""
+        entry = self.sessions()[session_id]
+        if entry["type"] == "llm":
+            subprocess.run(["claude", "stop", entry["short_id"]], capture_output=True, text=True, timeout=60)
+        elif libstate.alive(entry["pid"], entry["starttime"]):
+            try:
+                os.killpg(entry["pid"], signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        limit = time.monotonic() + HALT_WAIT_S
+        while libstate.alive(entry["pid"], entry["starttime"]) and time.monotonic() < limit:
+            child = self.children.get(session_id)
+            if child:
+                child.poll()
+            time.sleep(0.1)
+        child = self.children.pop(session_id, None)
+        if child:
+            child.poll()
+        entry.update(status="closed", closed=libstate.now(), close_reason=reason)
+        self.save_registry()
+        self.log("closed", position=entry["position"], session=session_id, reason=reason, detail=f"pid {entry['pid']}")
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Sessions: liveness, receipts, wake">
@@ -454,6 +681,7 @@ class Loop:
                 "alive": len(self.alive_sessions(position)),
                 "max_sessions": grant["max_sessions"],
                 "budget_tokens": grant["budget_tokens"],
+                "tokens": self.consumption(position),
                 "queued": sum(1 for request in pending if request.get("position") == position and request.get("queued")),
                 "mailbox": len(libstate.pending_messages(self.paths, position)),
             }
@@ -461,6 +689,8 @@ class Loop:
             "pid": os.getpid(), "starttime": libstate.start_time(os.getpid()), "started": self.started,
             "heartbeat": libstate.now(), "cycle_s": self.cycle_s, "code_root": str(CODE_ROOT),
             "positions": positions,
+            "interpellations_open": sum(1 for path in libstate.entry_files(self.paths.interpellations)
+                                        if (libstate.read_json(path) or {}).get("status") == "open"),
         })
     # </editor-fold>
 
@@ -482,7 +712,9 @@ class Loop:
     def cycle(self):
         self.reload_grants()
         self.reap()
+        self.account()
         self.process_requests()
+        self.deliver()
         self.wake_sessions()
         self.note_received()
         self.write_status()
@@ -514,6 +746,7 @@ def main():
     subcommands = parser.add_subparsers(dest="command")
     run_parser = subcommands.add_parser("run", help="the loop process (default)")
     run_parser.add_argument("--cycle", type=float, default=CYCLE_S)
+    run_parser.add_argument("--no-notify", action="store_true", help="no desktop notification for interpellations")
     switch_parser = subcommands.add_parser("switch", help="switches a position on or off, as the human")
     switch_parser.add_argument("position")
     switch_parser.add_argument("state", choices=("on", "off"))
@@ -529,7 +762,7 @@ def main():
         return human_request(paths, "switch", position=args.position, on=args.state == "on")
     if args.command == "spawn":
         return human_request(paths, "spawn", position=args.position, text=" ".join(args.text).strip())
-    return Loop(paths, args.cycle).run()
+    return Loop(paths, args.cycle, notify=not args.no_notify).run()
 
 
 if __name__ == "__main__":

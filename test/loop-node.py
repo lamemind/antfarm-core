@@ -5,6 +5,8 @@ It reads its mailbox with `request recv`, waiting; every line of a message is an
 
     spawn <position> [text]      request spawn; in the text `|` stands for a new line, so a spawn
                                  can carry the instructions of the session it asks for
+    escalate <arguments>         request escalate with the arguments split as a shell does, so
+                                 that `--alternative 'a b'` stays one argument
     spend <tokens>               adds the tokens to tokens.txt in its working directory: the
                                  consumption that the loop reads for a script session
     sleep <seconds>
@@ -14,6 +16,7 @@ After the instructions of a message it reads the next one; without messages it w
 Every instruction and its outcome go to stdout, which the loop keeps in loop/records/<session>/.
 """
 
+import shlex
 import subprocess
 import sys
 import time
@@ -44,6 +47,8 @@ def run(line):
     if word == "spawn":
         position, _, text = rest.partition(" ")
         request("spawn", position, *([text.replace("|", "\n")] if text else []))
+    elif word == "escalate":
+        request("escalate", *shlex.split(rest))
     elif word == "spend":
         spend(int(rest))
     elif word == "sleep":
