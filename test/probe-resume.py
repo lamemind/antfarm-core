@@ -24,7 +24,6 @@ Exits 0 when every measure produced a value, 1 otherwise.
 
 import json
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -48,8 +47,6 @@ FLAGS = [
 MINIMAL_ENVIRONMENT = ("HOME", "PATH")
 ENVIRONMENT_CANDIDATES = ("USER", "LOGNAME", "LANG", "SHELL", "TERM")
 MARKER = "ANTFARM_PROBE_MARKER"
-# The short id that `claude --bg` prints: followed by ` · <name>` only when the launch passes --name.
-SHORT_ID = re.compile(r"backgrounded · ([0-9a-f]{8})")
 
 launched = []
 
@@ -69,7 +66,7 @@ def launch(arguments, cwd, environment):
     outcome = subprocess.run(["claude", "--bg", *arguments], cwd=cwd, env=environment,
                              capture_output=True, text=True, timeout=120)
     output = outcome.stdout + outcome.stderr
-    hit = SHORT_ID.search(output)
+    hit = libmatch.LAUNCH_PATTERN.search(output)
     return outcome.returncode, output.strip(), hit.group(1) if hit else None
 
 
@@ -177,7 +174,7 @@ def measure_resume_and_survival():
     launcher = subprocess.Popen([sys.executable, "-c", launcher_code], cwd=cwd, env=base_environment(),
                                 stdout=subprocess.PIPE, text=True)
     first_line = launcher.stdout.readline()
-    hit = SHORT_ID.search(first_line)
+    hit = libmatch.LAUNCH_PATTERN.search(first_line)
     if not hit:
         launcher.kill()
         return {"error": f"launch through the launcher failed: {first_line!r}"}

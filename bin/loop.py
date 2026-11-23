@@ -51,7 +51,6 @@ import argparse
 import fcntl
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -76,9 +75,6 @@ CYCLE_S = 1.0
 # always reaches the session is the `env` block of --settings (test/probe-resume.py, measure 5).
 PASSED_VARIABLES = ("HOME", "PATH")
 BASH_TIMEOUT_MS = 900000
-# `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
-# passes --name: a resume does not.
-SHORT_ID = re.compile(r"backgrounded · ([0-9a-f]{8})")
 LAUNCH_TIMEOUT_S = 120
 STOP_WAIT_S = 30
 DECISION_WAIT_S = 5
@@ -289,7 +285,7 @@ class Loop:
                                      capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LaunchError(f"claude --bg does not run: {error}") from error
-        hit = SHORT_ID.search(outcome.stdout + outcome.stderr)
+        hit = libmatch.LAUNCH_PATTERN.search(outcome.stdout + outcome.stderr)
         if outcome.returncode != 0 or not hit:
             raise LaunchError(f"claude --bg exits {outcome.returncode}: {(outcome.stdout + outcome.stderr).strip()[:300]}")
         try:
@@ -623,16 +619,33 @@ class Loop:
             self.save_registry()
 
     def note_received(self):
-        """A row for every message that a session has read since the last cycle."""
+        """A row for every message that a session has read and that the log does not carry yet. A
+        read made while the loop was down gets its row at the first cycle after the restart, with
+        reason `before-start` and the time of the read in the message file."""
         for path in sorted(self.paths.mailboxes.glob("*/received/[0-9]*.json")):
-            if path.name in self.received_logged:
-                continue
             message = libstate.read_json(path)
-            if message is None:
+            if message is None or message.get("id") in self.received_logged:
                 continue
-            self.received_logged.add(path.name)
+            self.received_logged.add(message["id"])
+            before_start = (message.get("received") or "") < self.started
             self.log("received", position=message.get("position"), session=message.get("to_session"),
-                     sender=message.get("from"), detail=message["id"])
+                     sender=message.get("from"), reason="before-start" if before_start else None, detail=message["id"])
+
+    def logged_receipts(self):
+        """The ids of the messages whose read the log already carries: the log is the record."""
+        receipts = set()
+        try:
+            with open(self.paths.log, encoding="utf-8") as log_file:
+                for line in log_file:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("event") == "received" and row.get("detail"):
+                        receipts.add(row["detail"])
+        except OSError:
+            pass
+        return receipts
 
     def unread(self, session_id, position):
         return [message for _, message in libstate.pending_messages(self.paths, position)
@@ -663,7 +676,7 @@ class Loop:
         try:
             outcome = subprocess.run(["claude", "--bg", "--resume", entry["sessionId"], text], cwd=entry["cwd"],
                                      env=launch_environment(), capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)
-            hit = SHORT_ID.search(outcome.stdout + outcome.stderr)
+            hit = libmatch.LAUNCH_PATTERN.search(outcome.stdout + outcome.stderr)
             if outcome.returncode != 0 or not hit:
                 raise LaunchError(f"claude --bg --resume exits {outcome.returncode}: {(outcome.stdout + outcome.stderr).strip()[:300]}")
             if hit.group(1) != entry["short_id"]:
@@ -759,7 +772,7 @@ class Loop:
         self.registry = libstate.read_json(self.paths.sessions, {"sessions": {}})
         self.switches = {position: {"on": False, "since": self.started, "reason": "start"} for position in self.grants}
         self.save_switches()
-        self.received_logged = {path.name for path in self.paths.mailboxes.glob("*/received/[0-9]*.json")}
+        self.received_logged = self.logged_receipts()
         self.adopt()
         self.reject_stale_switches()
     # </editor-fold>

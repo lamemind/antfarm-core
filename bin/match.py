@@ -47,7 +47,9 @@ GRAPH_VALIDATOR = CODE_ROOT / "bin" / "validate-graph.py"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 BASH_TIMEOUT_MS = 900000
 VARIABLES_NOT_PASSED = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
-LAUNCH_PATTERN = re.compile(r"backgrounded · ([0-9a-f]{8}) · ")
+# `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
+# passes --name: a resume does not, and the id is followed by a new line.
+LAUNCH_PATTERN = re.compile(r"backgrounded · ([0-9a-f]{8})\b")
 SERVICE_WAIT_S = 60
 TYPES_WITHOUT_PROCESS = ("human", "source")
 ACTION_OUTCOME_LENGTH = 1000

@@ -360,6 +360,9 @@ verify "kill -9 of the loop: root-1 alive, same pid and starttime" test "$(ident
 verify "… lead-1 alive, same pid and starttime" test "$(identity lead-1)" == "$LEAD_BEFORE"
 kill_session lead-2
 forge human switch '{"position": "root", "on": true}' > /dev/null
+message_for root root-1 "sleep 0"
+verify "while the loop is down, root-1 reads a message" \
+  wait_for 5 bash -c "ls '$STATE/loop/mailboxes/root/received/' | grep -q json"
 SPAWNS=$(rows event=spawn)
 start_loop
 sleep 3
@@ -370,10 +373,16 @@ verify "… lead-2, dead meanwhile, closed with reason dead-at-restart" \
 verify "… 0 new spawns" rows_are "$SPAWNS" event=spawn
 verify "… the switch request deposited while it was down → rejected, stale" rows_are 1 event=rejected reason=stale
 verify "… every switch off" bash -c "! grep -q '\"on\": true' '$STATE/loop/switches.json'"
+verify "… the read made while it was down gets its row, reason before-start" \
+  rows_are 1 event=received session=root-1 reason=before-start
+verify "… once, and the reads logged before the crash are not repeated" \
+  python3 -c "import json, sys, collections; c = collections.Counter(json.loads(l)['detail'] for l in open(sys.argv[1]) if json.loads(l)['event'] == 'received'); assert max(c.values()) == 1, c" \
+  "$STATE/registry/loop.jsonl"
 verify "… the sessions untouched: same pid and starttime" \
   bash -c "[[ '$(identity root-1)' == '$ROOT_BEFORE' && '$(identity lead-1)' == '$LEAD_BEFORE' ]]"
 message_for root root-1 "sleep 0"
-verify "an adopted session still reads what the new loop delivers" wait_for 5 rows_are 1 event=received session=root-1
+verify "an adopted session still reads what the new loop delivers" \
+  wait_for 5 rows_are 1 event=received session=root-1 reason=None
 kill -TERM "$LOOP_PID"
 wait "$LOOP_PID" 2>/dev/null
 verify "SIGTERM: the loop exits with a stop row" rows_are 1 event=stop reason=sigterm
