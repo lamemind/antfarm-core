@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>antfarm · loop</title>
+  <link rel="stylesheet" href="/loop.css">
+</head>
+<body data-connection="connecting" data-loop="unknown">
+  <header>
+    <h1>antfarm · loop</h1>
+    <dl id="header-fields">
+      <div><dt>loop</dt><dd id="loop">—</dd></div>
+      <div><dt>heartbeat</dt><dd id="heartbeat">—</dd></div>
+      <div><dt>positions</dt><dd id="positions-count">—</dd></div>
+      <div><dt>live sessions</dt><dd id="sessions-count">—</dd></div>
+      <div><dt>state</dt><dd id="state-root">—</dd></div>
+      <div><dt>connection</dt><dd id="connection">opening</dd></div>
+    </dl>
+    <p id="last-action" aria-live="polite"></p>
+  </header>
+  <main>
+    <section id="org-chart" aria-label="positions">
+      <h2>Positions</h2>
+      <p id="positions-note"></p>
+      <div id="positions"></div>
+    </section>
+    <aside>
+      <section id="interpellations-panel">
+        <h2>Interpellations <span class="note">read only</span></h2>
+        <div id="interpellations"><p class="empty">none</p></div>
+      </section>
+      <section id="requests-panel">
+        <h2>Pending requests</h2>
+        <ol id="requests"></ol>
+      </section>
+      <section id="detail">
+        <h2 id="detail-title">Detail</h2>
+        <pre id="detail-json">Click a session, a message, a request or a row of the log: the raw record shows up here.</pre>
+      </section>
+      <section id="log-panel">
+        <h2>Log <span class="note">registry/loop.jsonl, newest first</span></h2>
+        <ol id="log"></ol>
+      </section>
+    </aside>
+  </main>
+  <script src="/loop.js"></script>
+</body>
+</html>
