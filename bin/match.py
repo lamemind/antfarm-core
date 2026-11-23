@@ -2,7 +2,9 @@
 
 Library of the director. It writes the two files that bind a session to the match without asking
 the agent anything: nodes.json — the (pid, starttime) pair that the bus compares with the
-caller's ancestors, plus sessionId, parent and task — and meta.json, the match parameters.
+caller's ancestors, plus sessionId, parent and task — and meta.json, the match parameters. The entry
+of an LLM node also carries `foreign_variables`: the names in the environment of its process that
+come from whoever started the Claude Code background service, an empty list when there are none.
 
 At the end of the match it writes into each node's entry `closed`, the time to the millisecond,
 `actions`, the list of the transcript's tool calls that are not a bus Bash command — a command is
@@ -46,7 +48,24 @@ BUS = CODE_ROOT / "bin" / "bus"
 GRAPH_VALIDATOR = CODE_ROOT / "bin" / "validate-graph.py"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 BASH_TIMEOUT_MS = 900000
-VARIABLES_NOT_PASSED = ("LOOM_TASK", "PROJECT_ROOT", "PTYXIS_PROFILE")
+# The environment of a `claude --bg` launch, for the director and for the loop: only these variables
+# pass. They reach a session only when its launch starts the Claude Code background service: the
+# session process carries the environment of the service, and the service keeps the one of the launch
+# that started it. What always reaches the commands of a session is the `env` block of --settings,
+# which wins over a variable of the service with the same name (test/probe-environment.py).
+PASSED_VARIABLES = ("HOME", "PATH")
+# The names in the environment of a session process under a service started with PASSED_VARIABLES
+# alone: the two, and the ones Claude Code adds itself, on a process the service kept ready and on one
+# it starts for the launch (test/probe-environment.py, measure c, Claude Code 2.1.330). Any other name
+# comes from whoever started the service.
+EXPECTED_VARIABLES = (
+    "AI_AGENT", "BROWSER", "CLAUDE_AFK_TIMEOUT_MS", "CLAUDE_BG_BACKEND", "CLAUDE_BG_DISPATCHER_RATE_LIMIT_TIER",
+    "CLAUDE_BG_DISPATCHER_SUBSCRIPTION_TYPE", "CLAUDE_BG_RENDEZVOUS_SOCK", "CLAUDE_BG_SESSION_CREDENTIAL",
+    "CLAUDE_BG_SOCKET_TOKENS_PATH", "CLAUDE_BG_SOURCE", "CLAUDE_CODE_HOST_SHORT_TEMP_DIRS",
+    "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_SESSION_KIND", "CLAUDE_CODE_SESSION_NAME", "CLAUDE_JOB_DIR",
+    "COLORTERM", "COREPACK_ENABLE_AUTO_PIN", "FORCE_COLOR", "HOME", "INVOCATION_ID",
+    "NoDefaultCurrentDirectoryInExePath", "PATH", "TERM", "_CLAUDE_CODE_ENABLE_TELEMETRY", "_DISABLE_TELEMETRY",
+)
 # `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
 # passes --name: a resume does not, and the id is followed by a new line.
 LAUNCH_PATTERN = re.compile(r"backgrounded · ([0-9a-f]{8})\b")
@@ -71,6 +90,28 @@ def process_start_time(pid):
     with open(f"/proc/{pid}/stat", encoding="utf-8") as stat_file:
         content = stat_file.read()
     return int(content[content.rindex(")") + 2:].split()[19])
+
+
+def launch_environment():
+    """The environment of a `claude --bg` launch: the PASSED_VARIABLES of this process, nothing else."""
+    return {name: os.environ[name] for name in PASSED_VARIABLES if name in os.environ}
+
+
+def foreign_variables(pid):
+    """The names in the environment of a session process outside EXPECTED_VARIABLES, sorted: the
+    variables of whoever started the background service. Names only, never values: a value can be
+    a secret, and it ends up in files that the state repository keeps. None if /proc/<pid>/environ
+    cannot be read.
+
+    The file is the environment the process was born with: the `env` block of --settings does not
+    show there, and neither do the variables that the Bash tool of the session adds to its commands
+    from the user's login shell."""
+    try:
+        entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    names = {entry.split(b"=", 1)[0].decode(errors="replace") for entry in entries if b"=" in entry}
+    return sorted(names - set(EXPECTED_VARIABLES))
 
 
 def write_json(path, data):
@@ -263,8 +304,7 @@ class Match:
         if model:
             command += ["--model", model]
         command.append(prompt)
-        environment = {key: value for key, value in os.environ.items() if key not in VARIABLES_NOT_PASSED}
-        launch = subprocess.run(command, cwd=cwd, env=environment, capture_output=True, text=True, timeout=120)
+        launch = subprocess.run(command, cwd=cwd, env=launch_environment(), capture_output=True, text=True, timeout=120)
         hit = LAUNCH_PATTERN.search(launch.stdout + launch.stderr)
         if launch.returncode != 0 or not hit:
             raise RuntimeError(f"launch of {node_id} failed (exit {launch.returncode}): {launch.stdout}{launch.stderr}")
@@ -282,6 +322,7 @@ class Match:
             "prompt": prompt_file.name,
             "launched": now("milliseconds"),
             "command": [part if part != prompt else f"<{prompt_file.name}>" for part in command],
+            "foreign_variables": foreign_variables(session["pid"]),
         }
         self.register(node_id, data)
         return data

@@ -213,6 +213,41 @@ verify "max_sessions 0 → 1" rejects invalid-zero-sessions "less than the minim
 verify "empty directory → 1" bash -c "mkdir -p '$TMP/empty' && ! '$VALIDATOR' '$TMP/empty'"
 verify "missing directory → 2" bash -c "'$VALIDATOR' '$TMP/missing'; [[ \$? -eq 2 ]]"
 
+# The environment of a launch, without claude: what bin/match.py passes to `claude --bg`, and what
+# it reads back from /proc/<pid>/environ of a process born with a variable of its own.
+launch_environment_check() { # <check>
+  mkdir -p "$TMP/state-environment"
+  ANTFARM_STATE_DIR="$TMP/state-environment" ANTFARM_TEST_LAUNCHER=1 python3 - "$ENGINE/bin" "$1" <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import match
+check = sys.argv[2]
+if check == "passed":
+    environment = match.launch_environment()
+    assert sorted(environment) == sorted(name for name in match.PASSED_VARIABLES if name in os.environ), environment
+    assert "ANTFARM_TEST_LAUNCHER" not in environment and "ANTFARM_STATE_DIR" not in environment, environment
+elif check in ("foreign", "clean"):
+    extra = {"ANTFARM_TEST_FOREIGN": "a value that is not written"} if check == "foreign" else {}
+    process = subprocess.Popen(["sleep", "30"], env={**match.launch_environment(), **extra})
+    try:
+        found = match.foreign_variables(process.pid)
+    finally:
+        process.kill()
+        process.wait()
+    assert found == sorted(extra), found
+elif check == "gone":
+    process = subprocess.Popen(["true"])
+    process.wait()
+    assert match.foreign_variables(process.pid) is None
+PY
+}
+
+echo "launch environment"
+verify "only PASSED_VARIABLES reach claude --bg, not the launcher's other variables" launch_environment_check passed
+verify "a process born with a variable of its own → its name, never its value" launch_environment_check foreign
+verify "a process born with the launch environment → empty list" launch_environment_check clean
+verify "a process that no longer exists → None" launch_environment_check gone
+
 echo "loop: start"
 new_state invalid invalid-two-roots
 "$LOOP" > "$STATE/loop.out" 2>&1

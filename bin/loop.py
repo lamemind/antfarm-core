@@ -21,6 +21,13 @@ its mailbox and the session has ended its turn: `claude stop`, then `claude --bg
 flags, which continues the same session with the options saved at launch. A session of type script
 is a local process, for the tests.
 
+An LLM session carries the environment of the Claude Code background service, not the loop's: the
+loop launches and wakes with HOME and PATH only (match.PASSED_VARIABLES), and the service keeps the
+environment of the launch that started it, the loop's or anyone else's. The loop does not prevent a
+foreign environment, it records it: the `spawn` and `wake` rows of an LLM session carry
+`foreign_variables`, the names in the environment of the session process outside
+match.EXPECTED_VARIABLES — names only, an empty list when there are none (README, The node).
+
 An escalation goes to the mailbox of the parent position, and the loop delivers it by rule: to the
 session that launched whoever escalates, if it is alive; else to another live session of the
 position; else to a new session it spawns. From the root, whose parent is the human, an escalation
@@ -70,10 +77,6 @@ REQUEST = CODE_ROOT / "bin" / "request"
 VALIDATOR = CODE_ROOT / "bin" / "validate-grants.py"
 HUMAN = libstate.HUMAN
 CYCLE_S = 1.0
-# The environment of a launch: only these variables pass. A session in the background carries
-# the environment of the Claude Code background service, which the first launch starts; what
-# always reaches the session is the `env` block of --settings (test/probe-resume.py, measure 5).
-PASSED_VARIABLES = ("HOME", "PATH")
 BASH_TIMEOUT_MS = 900000
 LAUNCH_TIMEOUT_S = 120
 STOP_WAIT_S = 30
@@ -90,10 +93,6 @@ HALT_WAIT_S = 5
 
 class LaunchError(Exception):
     pass
-
-
-def launch_environment():
-    return {name: os.environ[name] for name in PASSED_VARIABLES if name in os.environ}
 
 
 class Loop:
@@ -118,20 +117,24 @@ class Loop:
 
     # <editor-fold defaultstate="collapsed" desc="Log">
     def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None,
-            read_ts=None):
+            read_ts=None, foreign_variables=None):
         """One row of registry/loop.jsonl, and the same row in clear on the terminal. `ts` is the time
         the loop writes the row, so the file stays in write order; a `received` row also carries
         `read_ts`, the time the session read the message, which can be earlier than rows written
-        before it — the `closed` row of the same session included."""
+        before it — the `closed` row of the same session included. The `spawn` and `wake` rows of
+        an LLM session also carry `foreign_variables` (match.foreign_variables)."""
         row = {"ts": libstate.now(), "event": event, "position": position, "session": session,
                "request": request, "from": sender, "reason": reason, "detail": detail}
         if read_ts is not None:
             row["read_ts"] = read_ts
+        if foreign_variables is not None:
+            row["foreign_variables"] = foreign_variables
         self.paths.log.parent.mkdir(parents=True, exist_ok=True)
         with open(self.paths.log, "a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(row, ensure_ascii=False) + "\n")
         words = [row["ts"][11:23], f"{event:<17}", position or "-", session or "", reason or "", detail or "",
-                 f"read {read_ts[11:23]}" if read_ts else ""]
+                 f"read {read_ts[11:23]}" if read_ts else "",
+                 f"foreign variables {', '.join(foreign_variables)}" if foreign_variables else ""]
         print(" ".join(word for word in words if word), flush=True)
     # </editor-fold>
 
@@ -255,6 +258,7 @@ class Loop:
             self.log("spawn-failed", position=position, session=session_id, request=request_id,
                      sender=launched_by.get("session") or launched_by["kind"], reason=reason, detail=str(error))
             return None
+        foreign = launched.pop("foreign_variables", None)
         self.sessions()[session_id] = {
             "id": session_id, "position": position, **launched, "cwd": launch["cwd"],
             "launched": libstate.now(), "launched_by": launched_by, "request": request_id, "reason": reason,
@@ -263,13 +267,14 @@ class Loop:
         self.save_registry()
         self.log("spawn", position=position, session=session_id, request=request_id,
                  sender=launched_by.get("session") or launched_by["kind"], reason=reason,
-                 detail=f"{launched['type']} pid {launched['pid']}")
+                 detail=f"{launched['type']} pid {launched['pid']}", foreign_variables=foreign)
         return session_id
 
     def launch_llm(self, session_id, position, launch, records):
         """A Claude Code session in the background, with the flags of the launch template. The state
         root reaches it through the `env` block of --settings, the only environment that always
-        arrives (test/probe-resume.py, measure 5)."""
+        arrives (test/probe-environment.py). The result carries `foreign_variables`, for the spawn
+        row and not for the registry."""
         (records / "prompt.txt").write_text(launch["prompt"], encoding="utf-8")
         name = f"antfarm loop · {position} · {session_id}"
         command = ["claude", "--bg"]
@@ -288,7 +293,7 @@ class Loop:
             command += ["--model", launch["model"]]
         command.append(launch["prompt"])
         try:
-            outcome = subprocess.run(command, cwd=launch["cwd"], env=launch_environment(),
+            outcome = subprocess.run(command, cwd=launch["cwd"], env=libmatch.launch_environment(),
                                      capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LaunchError(f"claude --bg does not run: {error}") from error
@@ -303,12 +308,13 @@ class Loop:
             "type": "llm", "pid": entry["pid"], "starttime": libstate.start_time(entry["pid"]),
             "sessionId": entry["sessionId"], "short_id": entry["id"], "name": name,
             "command": [part if part != launch["prompt"] else "<prompt.txt>" for part in command],
+            "foreign_variables": libmatch.foreign_variables(entry["pid"]),
         }
 
     def launch_script(self, session_id, launch, records):
         """A local process in a session of its own: a Ctrl-C in the loop's terminal does not reach
         it, and the death of the loop does not end it."""
-        environment = {**launch_environment(), libgraph.STATE_VARIABLE: str(self.paths.state)}
+        environment = {**libmatch.launch_environment(), libgraph.STATE_VARIABLE: str(self.paths.state)}
         try:
             with open(records / "output.txt", "w", encoding="utf-8") as output:
                 process = subprocess.Popen(launch["command"], cwd=launch["cwd"], env=environment,
@@ -687,7 +693,8 @@ class Loop:
         text = WAKE_TEXT.replace("{request}", str(REQUEST))
         try:
             outcome = subprocess.run(["claude", "--bg", "--resume", entry["sessionId"], text], cwd=entry["cwd"],
-                                     env=launch_environment(), capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)
+                                     env=libmatch.launch_environment(), capture_output=True, text=True,
+                                     timeout=LAUNCH_TIMEOUT_S)
             hit = libmatch.LAUNCH_PATTERN.search(outcome.stdout + outcome.stderr)
             if outcome.returncode != 0 or not hit:
                 raise LaunchError(f"claude --bg --resume exits {outcome.returncode}: {(outcome.stdout + outcome.stderr).strip()[:300]}")
@@ -703,7 +710,8 @@ class Loop:
         entry.update(pid=resumed["pid"], starttime=libstate.start_time(resumed["pid"]),
                      wakes=entry.get("wakes", 0) + 1, last_wake=libstate.now())
         self.save_registry()
-        self.log("wake", position=entry["position"], session=session_id, detail=f"pid {resumed['pid']}")
+        self.log("wake", position=entry["position"], session=session_id, detail=f"pid {resumed['pid']}",
+                 foreign_variables=libmatch.foreign_variables(resumed["pid"]))
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Status">
