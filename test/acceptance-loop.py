@@ -3,15 +3,21 @@
 # requires-python = ">=3.11"
 # dependencies = ["playwright==1.60.0"]
 # ///
-"""Acceptance test of the loop view from the DOM, with headless Chromium driven by Playwright. No LLM:
-the sessions are script sessions (test/loop-node.py, on the grants of test/grants/script).
+"""Acceptance test of the loop: in neutral on the fixture, the view from the DOM with headless Chromium
+driven by Playwright, and on request one real session. Without --real-session no LLM: the sessions
+are script sessions (test/loop-node.py, on the grants of test/grants/script).
 
-    antfarm-core/test/acceptance-loop.py [--screenshots <directory>] [--keep]
+    antfarm-core/test/acceptance-loop.py [--real-session] [--neutral-s <seconds>] [--screenshots <directory>] [--keep]
 
-It runs on a temporary state root with a copy of the script grants, starts the loop and the view on
-it, and drives the page. Every figure it compares with the DOM is read here from the files of the
-loop — loop/status.json, switches.json, sessions.json, mailboxes/, requests/, interpellations/,
-registry/loop.jsonl — without going through the code of the view:
+Every scenario runs on a temporary state root of its own with a copy of the grants. Every figure it
+compares is read here from the files of the loop — loop/status.json, switches.json, sessions.json,
+mailboxes/, requests/, interpellations/, registry/loop.jsonl — without going through the code of
+the loop or of the view:
+
+- in neutral: the loop on the LLM fixture (test/grants/fixture) runs NEUTRAL_S seconds with every
+  switch off, with a `claude` first on its PATH that writes down every call and then runs the real
+  one: 0 spawn and 0 launching rows, 0 calls to `claude`, and 0 `claude` processes with their
+  working directory under the state root, looked for in /proc every quarter of a second
 
 - in neutral: one [data-position] per position of the status, one switch each, all off, no live
   session, no message
@@ -32,6 +38,13 @@ registry/loop.jsonl — without going through the code of the view:
 - a slow launch: on a second state root, with a fake `claude` (test/fake-claude.py) that takes
   LAUNCH_S for a launch, the session is in the DOM as launching, with its operation, while the
   registry says launching, and alive once the registry says alive
+- a real session, only with --real-session: on the LLM fixture, the switch of the root starts a
+  Claude Code session on haiku; its prompt asks a spawn on lead, which is off, and the log carries
+  the request queued; once the session has ended its turn the test deposits a message for it, the
+  loop wakes it with the resume and the log carries its second action, the read of the mailbox. In
+  its transcript, after the launch, every `user` entry that is not a tool_result is the fixed wake
+  text of the loop (WAKE_TEXT of bin/loop.py), one per wake row. It spends the tokens of two short
+  turns of haiku, and the session is stopped at the end
 
 With --screenshots it saves one screenshot per step; with --keep the temporary folder stays, with
 the log of the loop and of the view. Exits 1 if a check fails.
@@ -41,6 +54,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -61,6 +75,7 @@ import loopstate as libstate  # noqa: E402  only to deposit messages, as test/lo
 LOOP = ANTFARM / "bin" / "loop.py"
 VIEW = ANTFARM / "bin" / "loop-view.py"
 GRANTS = ANTFARM / "test" / "grants" / "script"
+FIXTURE_GRANTS = ANTFARM / "test" / "grants" / "fixture"
 FAKE_GRANTS = ANTFARM / "test" / "grants" / "fake"
 FAKE_CLAUDE = ANTFARM / "test" / "fake-claude.py"
 LAUNCH_S = 5
@@ -68,6 +83,10 @@ CYCLE = "0.2"
 WAIT_S = 15
 WAIT_MS = WAIT_S * 1000
 FOREIGN_ORIGIN = "http://example.org"
+NEUTRAL_S = 60
+# A real session: how long the launch, and one turn of haiku, may take.
+REAL_LAUNCH_S = 180
+REAL_TURN_S = 300
 
 failed = 0
 
@@ -437,13 +456,170 @@ def launching_scenario(page, processes, disk, screenshots):
     same_as_disk(page, disk, "after the launch")
 
 
-def run_scenario(folder, grants, scenario_function, screenshots, page_errors, loop_environment=None):
-    """A state root under the folder with a copy of the grants, the loop and the view on it, and the
-    scenario driven in a page of its own."""
+def new_state(folder, grants):
+    """A state root under the folder with a copy of the grants."""
     state = folder / "state"
     (state / "grants").mkdir(parents=True)
     for grant in grants.glob("*.json"):
         shutil.copy(grant, state / "grants" / grant.name)
+    return state
+
+
+# <editor-fold desc="In neutral">
+def claude_witness(state):
+    """A `claude` first on the PATH of the loop: it writes every call in claude-calls.txt, then runs
+    the real one. A call that lasts a moment leaves its line too, where a look at /proc can miss it."""
+    real = shutil.which("claude") or "false"
+    directory = state / "witness-bin"
+    directory.mkdir(parents=True)
+    calls = state / "claude-calls.txt"
+    witness = directory / "claude"
+    witness.write_text(f'#!/bin/sh\necho "$$ $*" >> {shlex.quote(str(calls))}\nexec {shlex.quote(real)} "$@"\n',
+                       encoding="utf-8")
+    witness.chmod(0o755)
+    return {"PATH": f"{directory}:{os.environ['PATH']}"}, calls
+
+
+def claude_processes_under(root):
+    """The pids of the `claude` processes whose working directory is the root or lies under it."""
+    found = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "comm").read_text().strip()
+            arguments = [Path(argument.decode(errors="replace")).name
+                         for argument in (entry / "cmdline").read_bytes().split(b"\0")[:2] if argument]
+            directory = Path(os.readlink(entry / "cwd"))
+        except OSError:
+            continue
+        if (command == "claude" or "claude" in arguments) and (directory == root or root in directory.parents):
+            found.add(int(entry.name))
+    return found
+
+
+def neutral_scenario(folder, seconds):
+    """The loop on the LLM fixture, every switch off, for the given seconds."""
+    state = new_state(folder, FIXTURE_GRANTS)
+    environment, calls = claude_witness(state)
+    processes = Processes(state, folder, environment)
+    disk = Disk(state)
+    try:
+        processes.start_loop()
+        print(f"in neutral on the fixture, {seconds} s")
+        seen = set()
+        limit = time.monotonic() + seconds
+        while time.monotonic() < limit:
+            seen |= claude_processes_under(state)
+            time.sleep(0.25)
+        status = disk.read(state / "loop" / "status.json", {})
+        switches = disk.read(state / "loop" / "switches.json", {})
+        verify("the loop runs on the three positions of the fixture",
+               processes.loop.poll() is None and sorted(status.get("positions", {})) == ["lead", "root", "worker"],
+               f"{sorted(status.get('positions', {}))}")
+        verify("… every switch off", not any((entry or {}).get("on") for entry in switches.values()), f"{switches}")
+        verify(f"… 0 spawn rows and 0 launching rows in {seconds} s",
+               disk.count(event="spawn") == 0 and disk.count(event="launching") == 0,
+               f"{disk.count(event='spawn')} spawn, {disk.count(event='launching')} launching")
+        verify("… 0 calls to claude", not calls.exists() or not calls.read_text().strip(),
+               calls.read_text() if calls.exists() else "")
+        verify("… 0 claude processes under the state root", not seen, f"{sorted(seen)}")
+    finally:
+        processes.stop()
+# </editor-fold>
+
+
+# <editor-fold desc="A real session">
+def session_status(short_id):
+    """The status of the session in `claude agents --json`: idle once it has ended its turn."""
+    try:
+        output = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=60)
+        return next((entry.get("status") for entry in json.loads(output.stdout) if entry.get("id") == short_id), None)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+
+
+def user_texts(transcript_path):
+    """The `user` entries of the transcript that are not a tool_result, in order, as text."""
+    texts = []
+    for line in transcript_path.read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "user":
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, list):
+            if content and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content):
+                continue
+            content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
+        texts.append({"text": content, "origin": (entry.get("origin") or {}).get("kind")})
+    return texts
+
+
+def wake_text():
+    """WAKE_TEXT of bin/loop.py, with the path of the request command as the loop writes it."""
+    text = re.search(r'^WAKE_TEXT = "(.+)"$', LOOP.read_text(encoding="utf-8"), re.MULTILINE).group(1)
+    return text.replace("{request}", str(ANTFARM / "bin" / "request"))
+
+
+def real_session_scenario(folder):
+    state = new_state(folder, FIXTURE_GRANTS)
+    processes = Processes(state, folder)
+    disk = Disk(state)
+    entry = {}
+    try:
+        processes.start_loop()
+        print("a real session (haiku)")
+        processes.human("switch", "root", "on")
+        verify("switch root on → spawn row of root-1",
+               wait_until(lambda: disk.count(event="spawn", session="root-1") == 1, REAL_LAUNCH_S))
+        entry = disk.sessions().get("root-1") or {}
+        verify("… a Claude Code session in the background, with its session id and short id",
+               entry.get("type") == "llm" and bool(entry.get("sessionId")) and bool(entry.get("short_id")), f"{entry}")
+        if not entry.get("short_id"):
+            return
+        verify("its first action, the spawn on lead of its prompt, is in the log: queued, lead switched off",
+               wait_until(lambda: disk.count(event="queued", position="lead", reason="switched-off", **{"from": "root-1"}) == 1,
+                          REAL_TURN_S))
+        verify("… it ends its turn: idle in claude agents --json",
+               wait_until(lambda: session_status(entry["short_id"]) == "idle", REAL_TURN_S))
+        message_for(state, "root", "root-1", "Messaggio del collaudo per root-1.")
+        verify("a message for it → the loop wakes it: wake row",
+               wait_until(lambda: disk.count(event="wake", session="root-1") == 1, REAL_LAUNCH_S))
+        verify("… the same session: same short id in the registry",
+               disk.sessions()["root-1"]["short_id"] == entry["short_id"], f"{disk.sessions()['root-1']}")
+        verify("its second action, the read of the mailbox, is in the log: received row",
+               wait_until(lambda: disk.count(event="received", session="root-1") == 1, REAL_TURN_S))
+        verify("… it ends its turn again",
+               wait_until(lambda: session_status(entry["short_id"]) == "idle", REAL_TURN_S))
+        transcript = next(iter(sorted((Path.home() / ".claude" / "projects").glob(f"*/{entry['sessionId']}.jsonl"))), None)
+        verify("its transcript exists", transcript is not None)
+        if transcript is None:
+            return
+        texts = user_texts(transcript)
+        after_launch = texts[1:]
+        expected = wake_text()
+        verify("in the transcript, after the launch, every user entry that is not a tool_result is the wake text",
+               bool(after_launch) and all(text["text"] == expected for text in after_launch),
+               f"{[text['text'][:80] for text in after_launch]}")
+        verify("… one per wake row", len(after_launch) == disk.count(event="wake", session="root-1"),
+               f"{len(after_launch)} texts, {disk.count(event='wake', session='root-1')} wake rows")
+        print(f"       origin.kind of the wake text: {sorted({text['origin'] for text in after_launch})}; "
+              f"tokens of root: {(disk.read(state / 'loop' / 'status.json', {}) or {}).get('positions', {}).get('root', {}).get('tokens')}")
+    finally:
+        for session in disk.sessions().values():
+            if session.get("type") == "llm" and session.get("status") == "alive" and session.get("short_id"):
+                subprocess.run(["claude", "stop", session["short_id"]], capture_output=True, timeout=60)
+        processes.stop()
+# </editor-fold>
+
+
+def run_scenario(folder, grants, scenario_function, screenshots, page_errors, loop_environment=None):
+    """A state root under the folder with a copy of the grants, the loop and the view on it, and the
+    scenario driven in a page of its own."""
+    state = new_state(folder, grants)
     environment = loop_environment(state) if loop_environment else None
     processes = Processes(state, folder, environment)
     try:
@@ -462,17 +638,22 @@ def run_scenario(folder, grants, scenario_function, screenshots, page_errors, lo
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--real-session", action="store_true", help="also one real session on haiku")
+    parser.add_argument("--neutral-s", type=float, default=NEUTRAL_S, help="seconds in neutral on the fixture")
     parser.add_argument("--screenshots", type=Path)
     parser.add_argument("--keep", action="store_true", help="keep the temporary folder")
     args = parser.parse_args()
     if args.screenshots:
         args.screenshots.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix="antfarm-loop-view-"))
+    folder = Path(tempfile.mkdtemp(prefix="antfarm-loop-acceptance-"))
     page_errors = []
     try:
+        neutral_scenario(folder / "neutral", args.neutral_s)
         run_scenario(folder / "script", GRANTS, scenario, args.screenshots, page_errors)
         run_scenario(folder / "fake", FAKE_GRANTS, launching_scenario, args.screenshots, page_errors, fake_claude)
         verify("no JavaScript error in the pages", not page_errors, "; ".join(page_errors))
+        if args.real_session:
+            real_session_scenario(folder / "real")
     finally:
         if args.keep:
             print(f"--keep: the temporary folder stays in {folder}")
@@ -480,9 +661,9 @@ def main():
             shutil.rmtree(folder, ignore_errors=True)
     print()
     if failed:
-        print(f"LOOP VIEW ACCEPTANCE TEST FAILED: {failed} checks")
+        print(f"LOOP ACCEPTANCE TEST FAILED: {failed} checks")
         return 1
-    print("loop view acceptance test: all ok")
+    print("loop acceptance test: all ok")
     return 0
 
 

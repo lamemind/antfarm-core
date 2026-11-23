@@ -103,13 +103,14 @@ json_field() { # <file> <python expression on d>
 }
 
 # The repository to install from: the files of this engine, committed, with the tags t1 and t2 and
-# the branch b1. The working tree of the engine can carry changes not yet committed.
+# the branch b1. The working tree of the engine can carry changes not yet committed. t1 is an
+# annotated tag, as a release is; t2 a lightweight one.
 mkdir -p "$SOURCE"
 (cd "$ANTFARM" && git ls-files -z --cached --others --exclude-standard | xargs -0 cp --parents -t "$SOURCE")
 git -C "$SOURCE" init --quiet --initial-branch main
 git -C "$SOURCE" -c user.name=test -c user.email=test@localhost add -A
 git -C "$SOURCE" -c user.name=test -c user.email=test@localhost commit --quiet -m t1
-git -C "$SOURCE" tag t1
+git -C "$SOURCE" -c user.name=test -c user.email=test@localhost tag -a t1 -m t1
 echo "second version" >> "$SOURCE/README.md"
 git -C "$SOURCE" -c user.name=test -c user.email=test@localhost commit --quiet -am t2
 git -C "$SOURCE" tag t2

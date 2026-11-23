@@ -287,7 +287,7 @@ def measure_environment():
         if not short_id:
             break
         entry = session(short_id)
-        attempt["session_markers"] = environment_values(entry["pid"], [MARKER, f"{MARKER}_FIRST", f"{MARKER}_SECOND", "LOOM_TASK"])
+        attempt["session_markers"] = environment_values(entry["pid"], [MARKER, f"{MARKER}_FIRST", f"{MARKER}_SECOND"])
         attempt["session_environment"] = environment_names(entry["pid"])
         attempt["status_after_turn"] = wait_turn_end(short_id)[0]
         attempt["transcript"] = libmatch.transcript(entry["sessionId"]) is not None
