@@ -218,7 +218,7 @@ verify "missing directory → 2" bash -c "'$VALIDATOR' '$TMP/missing'; [[ \$? -e
 launch_environment_check() { # <check>
   mkdir -p "$TMP/state-environment"
   ANTFARM_STATE_DIR="$TMP/state-environment" ANTFARM_TEST_LAUNCHER=1 python3 - "$ENGINE/bin" "$1" <<'PY'
-import os, subprocess, sys
+import json, os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 import match
 check = sys.argv[2]
@@ -239,6 +239,39 @@ elif check == "gone":
     process = subprocess.Popen(["true"])
     process.wait()
     assert match.foreign_variables(process.pid) is None
+elif check.startswith("version-"):
+    # A fake `claude` first on PATH, which answers only --version: the version EXPECTED_VARIABLES was
+    # measured on, another one, or nothing. The loop and a match of the director note it twice: the
+    # line is written once, and the launch is not stopped.
+    import tempfile
+    from pathlib import Path
+    import loop
+    state = Path(tempfile.mkdtemp(dir=os.environ["ANTFARM_STATE_DIR"]))
+    fake = state / "fake-bin"
+    fake.mkdir()
+    answer = {"version-current": f"echo '{match.EXPECTED_VARIABLES_CLAUDE_VERSION} (Claude Code)'",
+              "version-stale": "echo '9.9.9 (Claude Code)'", "version-mute": "exit 1"}[check]
+    (fake / "claude").write_text(f"#!/bin/sh\n[ \"$1\" = --version ] || exit 2\n{answer}\n")
+    (fake / "claude").chmod(0o755)
+    os.environ["PATH"] = f"{fake}:{os.environ['PATH']}"
+    the_loop = loop.Loop(loop.libstate.Paths(state), 1.0, notify=False)
+    the_loop.note_stale_expected_variables()
+    the_loop.note_stale_expected_variables()
+    log_file = state / "registry" / "loop.jsonl"
+    rows = [json.loads(line) for line in log_file.read_text().splitlines()] if log_file.exists() else []
+    stale = [row for row in rows if row["event"] == "expected-variables-stale"]
+    the_match = match.Match.create(check, "test", Path(sys.argv[1]).parent / "test" / "graphs" / "human.json", {})
+    the_match.note_stale_expected_variables()
+    the_match.note_stale_expected_variables()
+    meta = the_match.meta()
+    if check == "version-current":
+        assert match.stale_expected_variables() is None and not stale and "expected_variables_stale" not in meta, (stale, meta)
+    else:
+        expected = "9.9.9" if check == "version-stale" else "does not answer"
+        line = match.stale_expected_variables()
+        assert expected in line and "test/probe-environment.py settings" in line, line
+        assert len(stale) == 1 and stale[0]["detail"] == line, stale
+        assert meta["expected_variables_stale"] == line, meta
 PY
 }
 
@@ -247,6 +280,9 @@ verify "only PASSED_VARIABLES reach claude --bg, not the launcher's other variab
 verify "a process born with a variable of its own → its name, never its value" launch_environment_check foreign
 verify "a process born with the launch environment → empty list" launch_environment_check clean
 verify "a process that no longer exists → None" launch_environment_check gone
+verify "claude --version on the measured version → no line, in the loop log or in meta.json" launch_environment_check version-current
+verify "claude --version on another version → one stale row in the loop log and the field in meta.json" launch_environment_check version-stale
+verify "claude --version that does not answer → the same line, once" launch_environment_check version-mute
 
 echo "loop: start"
 new_state invalid invalid-two-roots

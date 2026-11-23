@@ -26,7 +26,10 @@ loop launches and wakes with HOME and PATH only (match.PASSED_VARIABLES), and th
 environment of the launch that started it, the loop's or anyone else's. The loop does not prevent a
 foreign environment, it records it: the `spawn` and `wake` rows of an LLM session carry
 `foreign_variables`, the names in the environment of the session process outside
-match.EXPECTED_VARIABLES — names only, an empty list when there are none (README, The node).
+match.EXPECTED_VARIABLES — names only, an empty list when there are none (README, The node). The
+expected names are measured on one version of Claude Code: before its first launch or wake the loop
+compares `claude --version` with match.EXPECTED_VARIABLES_CLAUDE_VERSION, and when they differ it writes
+an `expected-variables-stale` row that says the list is to be measured again.
 
 An escalation goes to the mailbox of the parent position, and the loop delivers it by rule: to the
 session that launched whoever escalates, if it is alive; else to another live session of the
@@ -114,6 +117,7 @@ class Loop:
         self.stopping = False
         self.started = None
         self.lock_file = None
+        self.expected_variables_checked = False
 
     # <editor-fold defaultstate="collapsed" desc="Log">
     def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None,
@@ -270,11 +274,23 @@ class Loop:
                  detail=f"{launched['type']} pid {launched['pid']}", foreign_variables=foreign)
         return session_id
 
+    def note_stale_expected_variables(self):
+        """Once per process, before the first launch or wake of an LLM session: when `claude
+        --version` is not the version of match.EXPECTED_VARIABLES, an `expected-variables-stale` row
+        in the log and on the terminal. The launch goes on."""
+        if self.expected_variables_checked:
+            return
+        self.expected_variables_checked = True
+        line = libmatch.stale_expected_variables()
+        if line:
+            self.log("expected-variables-stale", detail=line)
+
     def launch_llm(self, session_id, position, launch, records):
         """A Claude Code session in the background, with the flags of the launch template. The state
         root reaches it through the `env` block of --settings, the only environment that always
         arrives (test/probe-environment.py). The result carries `foreign_variables`, for the spawn
         row and not for the registry."""
+        self.note_stale_expected_variables()
         (records / "prompt.txt").write_text(launch["prompt"], encoding="utf-8")
         name = f"antfarm loop · {position} · {session_id}"
         command = ["claude", "--bg"]
@@ -686,6 +702,7 @@ class Loop:
         """`claude stop`, then `claude --bg --resume <sessionId>` without flags: the same session,
         with the options saved at launch, and a new process. A resume with flags, or on a session
         whose process is still alive, would start a copy (test/probe-resume.py, measures 1 and 2)."""
+        self.note_stale_expected_variables()
         subprocess.run(["claude", "stop", entry["short_id"]], capture_output=True, text=True, timeout=60)
         limit = time.monotonic() + STOP_WAIT_S
         while libstate.alive(entry["pid"], entry["starttime"]) and time.monotonic() < limit:

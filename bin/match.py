@@ -5,6 +5,8 @@ the agent anything: nodes.json — the (pid, starttime) pair that the bus compar
 caller's ancestors, plus sessionId, parent and task — and meta.json, the match parameters. The entry
 of an LLM node also carries `foreign_variables`: the names in the environment of its process that
 come from whoever started the Claude Code background service, an empty list when there are none.
+When `claude --version` is not the version on which the expected names were measured, meta.json
+carries `expected_variables_stale`, the line that says the list is to be measured again.
 
 At the end of the match it writes into each node's entry `closed`, the time to the millisecond,
 `actions`, the list of the transcript's tool calls that are not a bus Bash command — a command is
@@ -24,6 +26,7 @@ import and passed to the children as an absolute path.
 """
 
 import fcntl
+import functools
 import json
 import os
 import re
@@ -31,6 +34,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +70,11 @@ EXPECTED_VARIABLES = (
     "COLORTERM", "COREPACK_ENABLE_AUTO_PIN", "FORCE_COLOR", "HOME", "INVOCATION_ID",
     "NoDefaultCurrentDirectoryInExePath", "PATH", "TERM", "_CLAUDE_CODE_ENABLE_TELEMETRY", "_DISABLE_TELEMETRY",
 )
+# The version of Claude Code on which EXPECTED_VARIABLES was measured. A version that adds a name of its
+# own shows that name among the foreign variables of every session: director and loop compare this with
+# `claude --version` before their first launch, and say when the list is to be measured again.
+EXPECTED_VARIABLES_CLAUDE_VERSION = "2.1.330"
+EXPECTED_VARIABLES_PROBE = "antfarm-core/test/probe-environment.py settings"
 # `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
 # passes --name: a resume does not, and the id is followed by a new line.
 LAUNCH_PATTERN = re.compile(r"backgrounded · ([0-9a-f]{8})\b")
@@ -105,13 +114,37 @@ def foreign_variables(pid):
 
     The file is the environment the process was born with: the `env` block of --settings does not
     show there, and neither do the variables that the Bash tool of the session adds to its commands
-    from the user's login shell."""
+    from the user's shell profile."""
     try:
         entries = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     except OSError:
         return None
     names = {entry.split(b"=", 1)[0].decode(errors="replace") for entry in entries if b"=" in entry}
     return sorted(names - set(EXPECTED_VARIABLES))
+
+
+def claude_version():
+    """The first word that `claude --version` prints, None if the command does not answer."""
+    try:
+        outcome = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    words = outcome.stdout.split()
+    return words[0] if outcome.returncode == 0 and words else None
+
+
+@functools.cache
+def stale_expected_variables():
+    """None if `claude --version` is the version EXPECTED_VARIABLES was measured on; otherwise the
+    line that says the list is to be measured again. `claude --version` runs once per process, and
+    the answer stays for the launches that follow."""
+    version = claude_version()
+    if version == EXPECTED_VARIABLES_CLAUDE_VERSION:
+        return None
+    found = f"claude --version says {version}" if version else "claude --version does not answer"
+    return (f"{found}, and EXPECTED_VARIABLES was measured on Claude Code {EXPECTED_VARIABLES_CLAUDE_VERSION}: "
+            f"measure the expected names again with {EXPECTED_VARIABLES_PROBE}. Until then "
+            "foreign_variables can name variables of Claude Code itself; the launch goes on")
 
 
 def write_json(path, data):
@@ -283,8 +316,19 @@ class Match:
         write_json(self.nodes_file, nodes)
         self.update_meta(end=now(), outcome=outcome)
 
+    def note_stale_expected_variables(self):
+        """When `claude --version` is not the version of EXPECTED_VARIABLES: the line in the
+        `expected_variables_stale` field of meta.json, the record of the match, and on the terminal,
+        once per match. The launch goes on."""
+        line = stale_expected_variables()
+        if line is None or "expected_variables_stale" in self.meta():
+            return
+        self.update_meta(expected_variables_stale=line)
+        print(f"warning: {line}", file=sys.stderr, flush=True)
+
     def launch_node(self, node_id, prompt, task, model=None):
         """Isolated `claude --bg` session in the node's empty directory; returns the registered data."""
+        self.note_stale_expected_variables()
         cwd = self.directory / "nodes" / node_id
         cwd.mkdir(parents=True)
         prompt_file = self.directory / f"prompt-{node_id}.txt"
