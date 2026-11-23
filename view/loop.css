@@ -127,6 +127,8 @@ aside > section { padding: 12px 16px; border-bottom: 1px solid var(--border); ov
 .items li.selected, #requests li.selected, #log li.selected, .interpellation.selected { outline: 1px solid var(--selection); }
 [data-session][data-process="gone"] { color: var(--warning); }
 [data-session][data-status="closed"] { color: var(--muted); }
+[data-session][data-status="launching"] { color: var(--accent); font-style: italic; }
+[data-session][data-operation]:not([data-status="launching"]) { color: var(--accent); }
 [data-message][data-to=""] { color: var(--warning); }
 details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 8px; }
 

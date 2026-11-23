@@ -76,8 +76,9 @@ VIEW_FILES = {
     "/loop.js": ("loop.js", "text/javascript; charset=utf-8"),
     "/loop.css": ("loop.css", "text/css; charset=utf-8"),
 }
-SESSION_FIELDS = ("id", "position", "type", "status", "pid", "starttime", "short_id", "sessionId", "launched",
-                  "launched_by", "request", "reason", "wakes", "last_wake", "closed", "close_reason", "cwd")
+SESSION_FIELDS = ("id", "position", "type", "status", "operation", "pid", "starttime", "short_id", "sessionId",
+                  "decided", "launched", "launched_by", "request", "reason", "wakes", "last_wake", "closed",
+                  "close_reason", "cwd")
 
 
 # <editor-fold defaultstate="collapsed" desc="State on disk → one snapshot">

@@ -344,11 +344,12 @@ def loop_row(loop_module, event, session_id=None):
 
 
 def loop_launch(loop_module, loop, case, wake):
-    """One session through `Loop.spawn`, then, with `wake`, through `Loop.wake`; for each step the
-    `foreign_variables` field of its row in loop.jsonl, the string `absent` if the engine does not
-    write it."""
-    session_id = loop.spawn("root", {"kind": "human", "session": None}, None, f"probe-{case}")
-    if session_id is None:
+    """One session through `Loop.reserve` and its launch, then, with `wake`, through `Loop.wake`;
+    for each step the `foreign_variables` field of its row in loop.jsonl, the string `absent` if the
+    engine does not write it."""
+    session_id, operation = loop.reserve("root", {"kind": "human", "session": None}, None, f"probe-{case}")
+    loop.submit(operation)
+    if session_id not in loop.sessions():
         return {"error": f"spawn failed: {(loop_row(loop_module, 'spawn-failed') or {}).get('detail')}"}
     entry = loop.sessions()[session_id]
     launched.append(entry["short_id"])
@@ -359,7 +360,7 @@ def loop_launch(loop_module, loop, case, wake):
     if not wake:
         return result
     old_pid = entry["pid"]
-    loop.wake(session_id, entry)
+    loop.wake(session_id)
     wake_row = loop_row(loop_module, "wake", session_id)
     if wake_row is None:
         result["wake"] = {"error": (loop_row(loop_module, "wake-failed", session_id) or {}).get("detail")}

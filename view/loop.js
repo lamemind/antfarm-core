@@ -3,7 +3,8 @@
 // The server sends a `state` message every time the state on disk changes, and `log` messages with
 // the rows of registry/loop.jsonl. The page draws the org chart from the positions of the loop's
 // status, as a tree from the root down: for every position its switch (switches.json), its figures,
-// its live sessions (sessions.json), the messages still in its mailbox (loop/mailboxes/<position>/),
+// its live sessions (sessions.json: alive, or launching, each with the operation it is in, if any),
+// the messages still in its mailbox (loop/mailboxes/<position>/),
 // and its closed sessions folded. On the side: the interpellations, read only; the requests the
 // loop has not decided; the detail of what is clicked; the log, newest first.
 //
@@ -80,9 +81,9 @@ function renderHeader(state) {
   if (status === "absent") setText("loop", "absent · no status file");
   else if (status === "running") setText("loop", `running · pid ${state.loop.pid} · since ${clock(state.loop.started)}`);
   else setText("loop", `down · last pid ${state.loop.pid}`);
-  const alive = state.sessions.filter((session) => session.status === "alive").length;
+  const live = state.sessions.filter(isLive).length;
   setText("positions-count", String(Object.keys(state.positions).length));
-  setText("sessions-count", String(alive));
+  setText("sessions-count", String(live));
   setText("state-root", state.state_root);
   renderHeartbeat();
 }
@@ -140,16 +141,23 @@ function switchButton(id, on, loopRunning) {
   return button;
 }
 
+// A live session holds a place of the cap of its position: alive, or decided and being launched.
+function isLive(session) {
+  return session.status === "alive" || session.status === "launching";
+}
+
 function sessionItem(session) {
   const by = session.launched_by?.session || session.launched_by?.kind || "?";
-  const parts = session.status === "alive"
-    ? [session.id, session.type, `pid ${session.pid}`, `by ${by}`, session.reason]
-    : [session.id, session.close_reason, `closed ${clock(session.closed)}`];
+  let parts;
+  if (session.status === "alive") parts = [session.id, session.type, `pid ${session.pid}`, `by ${by}`, session.reason];
+  else if (session.status === "launching") parts = [session.id, session.type, "launching", `by ${by}`, session.reason];
+  else parts = [session.id, session.close_reason, `closed ${clock(session.closed)}`];
   if (session.status === "alive" && session.wakes) parts.push(`wakes ${session.wakes}`);
+  if (session.operation) parts.push(`${session.operation.kind} since ${clock(session.operation.since)}`);
   if (session.process === "gone") parts.push("process gone");
   const item = element("li", {
     "data-session": session.id, "data-status": session.status, "data-type": session.type,
-    "data-process": session.process,
+    "data-process": session.process, "data-operation": session.operation?.kind,
   }, parts.filter(Boolean).join(" · "));
   remember("session", session.id, session, item);
   return item;
@@ -175,9 +183,9 @@ function positionCard(state, id, depth) {
   const switchEntry = state.switches[id] || {};
   const on = switchEntry.on === true;
   const sessions = state.sessions.filter((session) => session.position === id)
-    .sort((a, b) => (a.launched || "").localeCompare(b.launched || ""));
-  const alive = sessions.filter((session) => session.status === "alive");
-  const closed = sessions.filter((session) => session.status !== "alive");
+    .sort((a, b) => (a.decided || a.launched || "").localeCompare(b.decided || b.launched || ""));
+  const live = sessions.filter(isLive);
+  const closed = sessions.filter((session) => !isLive(session));
   const mailbox = state.mailboxes[id] || [];
   const queued = state.requests.filter((request) => request.position === id && request.queued).length;
   const tokens = figures.tokens;
@@ -200,7 +208,7 @@ function positionCard(state, id, depth) {
   const numbers = element("dl", { class: "figures" });
   const meter = typeof tokens === "number" ? element("meter", { min: "0", max: String(budget), value: String(tokens), high: String(budget * 0.8) }) : null;
   numbers.append(
-    figure("sessions", `${alive.length}/${figures.max_sessions}`),
+    figure("sessions", `${live.length}/${figures.max_sessions}`),
     figure("tokens", `${typeof tokens === "number" ? tokens : "—"}/${budget}`, meter),
     figure("queued", String(queued)),
     figure("mailbox", String(mailbox.length)),
@@ -209,7 +217,7 @@ function positionCard(state, id, depth) {
   if (figures.launch_type) numbers.append(figure("launch", figures.launch_type));
   card.append(numbers);
 
-  card.append(element("h4", {}, "live sessions"), list(alive.map(sessionItem), "none"));
+  card.append(element("h4", {}, "live sessions"), list(live.map(sessionItem), "none"));
   card.append(element("h4", {}, "mailbox"), list(mailbox.map(messageItem), "empty"));
   if (closed.length) {
     const folded = element("details");
@@ -277,7 +285,8 @@ function renderInterpellations(state) {
 
 function renderRequests(state) {
   const items = state.requests.map((request) => {
-    const outcome = request.queued ? `queued · ${request.queued.reason}` : "not yet decided";
+    const outcome = request.launching ? `accepted · ${request.launching.session} launching`
+      : request.queued ? `queued · ${request.queued.reason}` : "not yet decided";
     const item = element("li", { "data-request": request.id, "data-kind": request.kind, "data-queued": request.queued ? request.queued.reason : "" },
       `${request.kind} ${request.position ?? ""} · from ${request.from} · ${outcome}`);
     remember("request", request.id, request, item);
@@ -293,7 +302,8 @@ function renderRequests(state) {
 function logItem(row) {
   view.logCounter += 1;
   const words = [row.event, row.position, row.session, row.from && row.from !== row.session ? `from ${row.from}` : null,
-    row.reason, row.read_ts ? `read ${row.read_ts.slice(11, 23)}` : null, row.detail].filter(Boolean);
+    row.reason, row.read_ts ? `read ${row.read_ts.slice(11, 23)}` : null,
+    row.started_ts ? `started ${row.started_ts.slice(11, 23)}` : null, row.detail].filter(Boolean);
   const item = element("li", { "data-log-row": String(view.logCounter), "data-event": row.event });
   item.append(element("span", { class: "time" }, clock(row.ts)), document.createTextNode(words.join(" · ")));
   item.record = row;

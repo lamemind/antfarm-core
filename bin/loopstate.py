@@ -6,7 +6,7 @@ Everything lives under the state root (ANTFARM_STATE_DIR):
     loop/requests/                requests waiting for the loop, one JSON file each
     loop/requests/done/           requests the loop has decided, with outcome and reason
     loop/mailboxes/<position>/    messages for the sessions of a position; received/ once read
-    loop/sessions.json            the registry of the sessions the loop launched
+    loop/sessions.json            the registry of the sessions the loop decided: launching, alive, closed
     loop/switches.json            the switch of every position
     loop/status.json              the loop pid, its heartbeat and a summary per position
     loop/interpellations/         the questions that climb from the root to the human
@@ -111,7 +111,8 @@ def deposit_request(paths, sender, kind, **fields):
 
 def request_state(paths, request_id):
     """The request as the loop left it: decided (in done/, with `outcome`), queued (pending, with
-    `queued`), or pending and not yet seen (no `outcome`). None if it does not exist."""
+    `queued`), accepted with its session being launched (pending, with `launching`), or pending and
+    not yet seen (no `outcome`). None if it does not exist."""
     for directory in (paths.requests_done, paths.requests):
         for path in Path(directory).glob(f"[0-9]*-{request_id}.json"):
             return read_json(path)
@@ -119,11 +120,14 @@ def request_state(paths, request_id):
 
 
 def wait_for_decision(paths, request_id, wait_s):
-    """The request once the loop has decided or queued it, or as it is at the end of the wait."""
+    """The request once the loop has decided, queued or accepted it, or as it is at the end of the
+    wait. An accepted spawn answers before its launch ends: whoever asks four spawns one after the
+    other gets four launches that run together."""
     limit = time.monotonic() + wait_s
     while True:
         state = request_state(paths, request_id)
-        if state is None or state.get("outcome") or state.get("queued") or time.monotonic() >= limit:
+        if state is None or any(state.get(field) for field in ("outcome", "queued", "launching")) \
+                or time.monotonic() >= limit:
             return state
         time.sleep(POLLING_STEP_S)
 
@@ -148,6 +152,8 @@ def describe_decision(state):
     if state.get("outcome"):
         template = OUTCOME_TEXTS.get(state["outcome"], state["outcome"])
         return template.format_map({key: state.get(key) or "" for key in ("session", "position", "interpellation", "detail")})
+    if state.get("launching"):
+        return f"accettata: sessione {state['launching']['session']} in lancio; l'esito sarà nel log del loop"
     if state.get("queued"):
         return f"in coda: {state['queued']['reason']} — {state['queued']['detail']}; il loop la esegue quando può"
     return "depositata: il loop non l'ha ancora letta; l'esito sarà nel log del loop"
