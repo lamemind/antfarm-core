@@ -44,8 +44,42 @@ def result_text(block):
 
 
 def read_records(path):
-    with open(path, encoding="utf-8") as transcript:
-        return [json.loads(row) for row in transcript if row.strip()]
+    """The records of a transcript, one per row. A row that does not decode is skipped: Claude Code
+    appends to the transcript while a session runs, and a read can land on the last row half
+    written. The next read finds it whole, and the tokens count each `message.id` once, so a row
+    skipped and read again later does not count twice."""
+    records = []
+    with open(path, encoding="utf-8", errors="replace") as transcript:
+        for row in transcript:
+            if not row.strip():
+                continue
+            try:
+                records.append(json.loads(row))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def assistant_messages(records):
+    """message.id → message, for every assistant record that carries an id: a message split over
+    several records counts once."""
+    messages = {}
+    for record in records:
+        if record.get("type") == "assistant" and (record.get("message") or {}).get("id"):
+            messages[record["message"]["id"]] = record["message"]
+    return messages
+
+
+def usage_of(messages):
+    """The four usage fields summed over the messages."""
+    return {field: sum((message.get("usage") or {}).get(field) or 0 for message in messages.values())
+            for field in USAGE_FIELDS}
+
+
+def transcript_tokens(path):
+    """The tokens of the transcript at the path, as measure_session counts them, for whoever already
+    has the path and would not look it up again."""
+    return sum(usage_of(assistant_messages(read_records(path))).values())
 
 
 def measure_session(node_id, node_data, director_pid):
@@ -53,10 +87,7 @@ def measure_session(node_id, node_data, director_pid):
     measure = {"node": node_id, "sessionId": node_data["sessionId"], "transcript": str(path) if path else None}
     records = read_records(path) if path else []
 
-    messages = {}
-    for record in records:
-        if record.get("type") == "assistant" and (record.get("message") or {}).get("id"):
-            messages[record["message"]["id"]] = record["message"]
+    messages = assistant_messages(records)
     measure["assistant_turns"] = len(messages)
 
     parent = node_data.get("parent") or {}
@@ -68,8 +99,7 @@ def measure_session(node_id, node_data, director_pid):
         all(isinstance((message.get("usage") or {}).get(field), int) for field in USAGE_FIELDS)
         for message in messages.values()
     )
-    measure["usage"] = {field: sum((message.get("usage") or {}).get(field) or 0 for message in messages.values())
-                       for field in USAGE_FIELDS}
+    measure["usage"] = usage_of(messages)
     measure["token"] = sum(measure["usage"].values())
 
     users = [record for record in records if record.get("type") == "user"]

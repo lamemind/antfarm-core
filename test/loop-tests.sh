@@ -625,6 +625,15 @@ fake_ready() { # <session>: its fake process has run its first `request recv`, s
     "$(session_field "$1" pid)" ]]
 }
 
+position_tokens() { # <position> <tokens>: the tokens that status.json counts for the position
+  [[ $(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['positions'][sys.argv[2]]['tokens'])" \
+       "$STATE/loop/status.json" "$1") == "$2" ]]
+}
+
+transcript_of() { # <session>: the transcript the fake claude writes for it, under the HOME of the loop
+  echo "$STATE/home/.claude/projects/fake-claude/$(session_field "$1" sessionId).jsonl"
+}
+
 request_id() { # <file>: the request id that a command of the loop printed
   grep -o 'r-[0-9a-f]*' "$1" | head -1
 }
@@ -937,6 +946,49 @@ verify "… lead-1 closed with reason halt-budget, never resumed" \
   wait_for 15 rows_are 1 event=closed session=lead-1 reason=halt-budget
 verify "… no wake row for lead-1" rows_are 0 event=wake session=lead-1
 verify "… lead-2 closed too" wait_for 10 rows_are 1 event=closed session=lead-2 reason=halt-budget
+stop_loop
+
+echo "loop: a transcript that ends in the middle of a row"
+new_state half-row fake
+fake_claude 1 1 1 0 600
+start_loop 2
+"$LOOP" switch lead on > /dev/null
+"$LOOP" spawn lead > /dev/null
+verify "lead-1 spends 600: the status counts them" wait_for 10 position_tokens lead 600
+TRANSCRIPT=$(transcript_of lead-1)
+printf '{"type": "assistant", "message": {"id": "msg-half", "usage": {"input_tokens": 100' >> "$TRANSCRIPT"
+sleep 1
+verify "a transcript whose last row is half written: the loop keeps running" kill -0 "$LOOP_PID"
+verify "… its heartbeat moves" python3 -c "import sys; assert float(sys.argv[1]) <= 2 * $CYCLE" "$(heartbeat_gap 1)"
+verify "… and it counts the whole rows: still 600" position_tokens lead 600
+printf ', "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}\n' >> "$TRANSCRIPT"
+verify "the row completed → 700" wait_for 5 position_tokens lead 700
+sleep 1
+verify "… the row read again counts once: still 700 a few cycles later" position_tokens lead 700
+stop_loop
+
+echo "loop: a stop that does not end the process"
+new_state stop-fails fake
+fake_claude 1 1 1 0 600
+fake_set ignore_stops 1
+grant_budget lead 1000
+start_loop 4
+"$LOOP" switch lead on > /dev/null
+"$LOOP" spawn lead > /dev/null
+"$LOOP" spawn lead > /dev/null
+verify "two fake sessions spend 1200 over a budget of 1000 → halt" wait_for 15 rows_are 1 event=halt position=lead reason=budget
+verify "the fake claude ignores the first stop: a stop-failed row for each session" \
+  wait_for 15 rows_are 2 event=stop-failed position=lead reason=halt-budget
+verify "… lead-1 still alive in the registry, with its stop" concurrency_check session lead-1 alive stop
+verify "… lead-2 too" concurrency_check session lead-2 alive stop
+verify "… and their processes live" bash -c "kill -0 $(session_field lead-1 pid) && kill -0 $(session_field lead-2 pid)"
+verify "the stop repeated ends them: closed with reason halt-budget" \
+  wait_for 15 rows_are 2 event=closed position=lead reason=halt-budget
+verify "… lead-1 after its stop-failed row" concurrency_check after stop-failed lead-1 closed lead-1
+verify "… lead-2 after its stop-failed row" concurrency_check after stop-failed lead-2 closed lead-2
+verify "… the process of lead-1 is gone" process_ended "$(session_field lead-1 pid)"
+verify "… the process of lead-2 is gone" process_ended "$(session_field lead-2 pid)"
+verify "… one stop-failed row each, however many times the stop is repeated" rows_are 2 event=stop-failed
 stop_loop
 
 fi

@@ -6,7 +6,7 @@ The test copies this file as `claude` into a directory of its own, puts the dire
 PATH of the loop, and writes config.json next to it:
 
     {"launch_s": 5, "resume_s": 5, "stop_s": 5, "agents_s": 0, "version": "2.1.330",
-     "request": "<engine>/bin/request", "tokens": 600}
+     "request": "<engine>/bin/request", "tokens": 600, "ignore_stops": 0}
 
 It answers the commands the loop runs, as Claude Code does (antfarm-core/test/probe-resume.py):
 
@@ -15,7 +15,8 @@ It answers the commands the loop runs, as Claude Code does (antfarm-core/test/pr
     claude --bg --resume <sessionId> <t>  after resume_s, the same session in a new process, same
                                           short id: `backgrounded · <id>`; a copy with a new id if
                                           the process of the session is still alive
-    claude stop <id>                      after stop_s, the process of the session ends
+    claude stop <id>                      after stop_s, the process of the session ends; the first
+                                          `ignore_stops` stops of a session exit 0 and end nothing
     claude agents --json                  after agents_s, the live sessions, all `idle`
 
 A session is a process of this file started in a process session of its own, with the environment
@@ -147,6 +148,10 @@ def command_stop(short_id):
     except (OSError, json.JSONDecodeError):
         print(f"no session {short_id}", file=sys.stderr)
         return 1
+    if state.get("stops_ignored", 0) < CONFIG.get("ignore_stops", 0):
+        state["stops_ignored"] = state.get("stops_ignored", 0) + 1
+        save(state)
+        return 0
     if alive(state):
         try:
             os.killpg(state["pid"], signal.SIGTERM)

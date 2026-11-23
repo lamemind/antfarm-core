@@ -365,7 +365,7 @@ def run_wake(operation):
 def run_stop(operation):
     """`claude stop` for an LLM session, SIGTERM to the process group of a script session — its
     `request recv` too, which would otherwise outlive it —, then the wait for the end of the
-    process, up to HALT_WAIT_S. The session is closed whatever the wait finds."""
+    process, up to HALT_WAIT_S. The outcome says whether the process is still alive."""
     entry, child = operation.data["entry"], operation.data.get("child")
     if entry["type"] == "llm":
         try:
@@ -384,7 +384,7 @@ def run_stop(operation):
         time.sleep(0.1)
     if child:
         child.poll()
-    return {}
+    return {"alive": libstate.alive(entry["pid"], entry["starttime"])}
 
 
 def run_states(_operation):
@@ -477,7 +477,9 @@ class Loop:
         self.concurrency = concurrency
         self.held = {}
         self.transcripts = {}
+        self.transcript_missed = {}
         self.token_cache = {}
+        self.cycles = 0
         self.grants = {}
         self.fingerprint = None
         self.rejected_fingerprint = None
@@ -1054,7 +1056,9 @@ class Loop:
     def session_tokens(self, entry):
         """The tokens a session has spent: for an LLM session the four `usage` fields of its
         transcript, each `message.id` counted once (observe.py); for a script session the number
-        it writes in tokens.txt of its working directory. A session being launched has spent nothing."""
+        it writes in tokens.txt of its working directory. A session being launched has spent nothing.
+        The path of a transcript, once found, stays in memory; a transcript not found yet is looked
+        for at most once per cycle, because the lookup scans every directory of ~/.claude/projects."""
         if entry["status"] == "launching":
             return 0
         if entry["type"] == "script":
@@ -1064,9 +1068,13 @@ class Loop:
                 return 0
         session_id = entry["sessionId"]
         if session_id not in self.transcripts:
+            if self.transcript_missed.get(session_id) == self.cycles:
+                return 0
             path = libmatch.transcript(session_id)
             if path is None:
+                self.transcript_missed[session_id] = self.cycles
                 return 0
+            self.transcript_missed.pop(session_id, None)
             self.transcripts[session_id] = path
         path = self.transcripts[session_id]
         try:
@@ -1076,7 +1084,7 @@ class Loop:
         key = (status.st_size, status.st_mtime_ns)
         cached = self.token_cache.get(session_id)
         if cached is None or cached[0] != key:
-            tokens = libobserve.measure_session(entry["id"], {"sessionId": session_id}, None)["token"]
+            tokens = libobserve.transcript_tokens(path)
             self.token_cache[session_id] = cached = (key, tokens)
         return cached[1]
 
@@ -1135,12 +1143,32 @@ class Loop:
         self.submit(Operation("stop", session_id, entry=dict(entry), child=self.children.get(session_id), reason=reason))
 
     def stopped(self, operation):
-        entry = self.sessions()[operation.session_id]
-        self.children.pop(operation.session_id, None)
+        """The session is closed once its process is gone. A process still alive after the stop keeps
+        the session alive, with its stop written on it: a `stop-failed` row at the first failure, and
+        the stop handed over again, ahead of the launches and the wakes that wait, until the pair
+        pid and starttime no longer exists. A session closed while its process lives would be a live
+        session that no budget looks at."""
+        session_id = operation.session_id
+        entry = self.sessions()[session_id]
+        reason = operation.data["reason"]
+        alive = operation.outcome["alive"] if "alive" in operation.outcome \
+            else libstate.alive(entry["pid"], entry["starttime"])
+        if alive:
+            mark = entry.setdefault("operation", {"kind": "stop", "since": libstate.now(), "reason": reason})
+            mark["attempts"] = mark.get("attempts", 1) + 1
+            self.save_registry()
+            if mark["attempts"] == 2:
+                self.log("stop-failed", position=entry["position"], session=session_id, reason=reason,
+                         detail=f"pid {entry['pid']} alive {HALT_WAIT_S} s after the stop: the stop is repeated",
+                         started_ts=operation.started_ts)
+            self.submit(Operation("stop", session_id, entry=dict(entry), child=self.children.get(session_id),
+                                  reason=reason))
+            return
+        self.children.pop(session_id, None)
         entry.pop("operation", None)
-        entry.update(status="closed", closed=libstate.now(), close_reason=operation.data["reason"])
+        entry.update(status="closed", closed=libstate.now(), close_reason=reason)
         self.save_registry()
-        self.log("closed", position=entry["position"], session=operation.session_id, reason=operation.data["reason"],
+        self.log("closed", position=entry["position"], session=session_id, reason=reason,
                  detail=f"pid {entry['pid']}", started_ts=operation.started_ts)
     # </editor-fold>
 
@@ -1242,12 +1270,16 @@ class Loop:
 
     def woken(self, operation):
         """The session continues with a new process, or is closed if the wake failed, or if a stop
-        arrived before the resume. A stop asked after the resume follows the wake."""
+        arrived before the resume — closed only if `claude stop` ended its process, otherwise the
+        stop goes on as an operation of its own. A stop asked after the resume follows the wake."""
         session_id = operation.session_id
         entry = self.sessions()[session_id]
         outcome = operation.outcome
         self.note_stale_expected_variables()
         entry.pop("operation", None)
+        if outcome.get("stopped") and libstate.alive(entry["pid"], entry["starttime"]):
+            self.stop_session(session_id, operation.stop_reason)
+            return
         if outcome.get("stopped"):
             entry.update(status="closed", closed=libstate.now(), close_reason=operation.stop_reason)
             self.save_registry()
@@ -1446,6 +1478,7 @@ class Loop:
     # </editor-fold>
 
     def cycle(self):
+        self.cycles += 1
         self.apply_outcomes()
         self.reload_grants()
         self.reap()
