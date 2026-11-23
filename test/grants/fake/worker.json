@@ -1,0 +1,13 @@
+{
+  "position": "worker",
+  "description": "Figlia di lead con tetto 1, sessioni script: le richieste decise mentre un lancio llm è in corso.",
+  "parent": "lead",
+  "max_sessions": 1,
+  "budget_tokens": 1000000,
+  "launch": {
+    "type": "script",
+    "command": [
+      "{code}/test/loop-node.py"
+    ]
+  }
+}

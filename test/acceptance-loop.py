@@ -29,6 +29,9 @@ registry/loop.jsonl — without going through the code of the view:
   the log of the DOM is registry/loop.jsonl row by row
 - the loop dies: after its kill -9 the view stays up, says that the loop is down, disables the
   switches and still lists the live sessions
+- a slow launch: on a second state root, with a fake `claude` (test/fake-claude.py) that takes
+  LAUNCH_S for a launch, the session is in the DOM as launching, with its operation, while the
+  registry says launching, and alive once the registry says alive
 
 With --screenshots it saves one screenshot per step; with --keep the temporary folder stays, with
 the log of the loop and of the view. Exits 1 if a check fails.
@@ -58,6 +61,9 @@ import loopstate as libstate  # noqa: E402  only to deposit messages, as test/lo
 LOOP = ANTFARM / "bin" / "loop.py"
 VIEW = ANTFARM / "bin" / "loop-view.py"
 GRANTS = ANTFARM / "test" / "grants" / "script"
+FAKE_GRANTS = ANTFARM / "test" / "grants" / "fake"
+FAKE_CLAUDE = ANTFARM / "test" / "fake-claude.py"
+LAUNCH_S = 5
 CYCLE = "0.2"
 WAIT_S = 15
 WAIT_MS = WAIT_S * 1000
@@ -177,17 +183,18 @@ def same_as_disk(page, disk, label):
 
 # <editor-fold desc="Processes">
 class Processes:
-    def __init__(self, state, records):
+    def __init__(self, state, records, loop_environment=None):
         self.state = state
         self.records = records
         self.environment = {**os.environ, "ANTFARM_STATE_DIR": str(state)}
+        self.loop_environment = {**self.environment, **(loop_environment or {})}
         self.loop = None
         self.view = None
         self.address = None
 
     def start_loop(self):
         output = open(self.records / "loop.out", "a", encoding="utf-8")
-        self.loop = subprocess.Popen([str(LOOP), "--cycle", CYCLE, "--no-notify"], env=self.environment,
+        self.loop = subprocess.Popen([str(LOOP), "--cycle", CYCLE, "--no-notify"], env=self.loop_environment,
                                      stdout=output, stderr=subprocess.STDOUT)
         if not wait_until(lambda: (self.state / "loop" / "status.json").exists()):
             raise SystemExit(f"the loop does not write its status: {(self.records / 'loop.out').read_text()}")
@@ -392,6 +399,67 @@ def scenario(page, processes, disk, screenshots):
     screenshot(page, screenshots, "down")
 
 
+def fake_claude(state):
+    """test/fake-claude.py as `claude` in <state>/fake-bin, with LAUNCH_S for a launch; the environment
+    of the loop: that directory first on PATH, and a HOME of its own for the transcripts."""
+    directory = state / "fake-bin"
+    directory.mkdir(parents=True)
+    shutil.copy(FAKE_CLAUDE, directory / "claude")
+    (directory / "claude").chmod(0o755)
+    version = re.search(r'EXPECTED_VARIABLES_CLAUDE_VERSION = "([^"]+)"',
+                        (ANTFARM / "bin" / "match.py").read_text(encoding="utf-8")).group(1)
+    (directory / "config.json").write_text(json.dumps({
+        "launch_s": LAUNCH_S, "resume_s": 1, "stop_s": 1, "agents_s": 0, "tokens": 0, "version": version,
+        "request": str(ANTFARM / "bin" / "request")}), encoding="utf-8")
+    (state / "home").mkdir()
+    return {"PATH": f"{directory}:{os.environ['PATH']}", "HOME": str(state / "home")}
+
+
+def launching_scenario(page, processes, disk, screenshots):
+    page.goto(processes.address)
+    page.wait_for_selector('body[data-connection="open"][data-loop="running"]', state="attached", timeout=WAIT_MS)
+    print("a slow launch")
+    page.click('[data-switch="lead"]')
+    verify("click on the switch of lead → on in the DOM", switch_settled(page, "lead", True))
+    answer = processes.human("spawn", "lead")
+    verify("a spawn on lead → accepted at once, lead-1 launching", "lead-1 in lancio" in answer.stdout, answer.stdout)
+    verify("… lead-1 launching in the registry",
+           (disk.sessions().get("lead-1") or {}).get("status") == "launching", f"{disk.sessions().get('lead-1')}")
+    selector = '[data-position="lead"] [data-session="lead-1"][data-status="launching"][data-operation="launch"]'
+    verify("… and in the DOM, with its operation, among the live sessions of lead", appears(page, selector))
+    verify("… while the registry still says launching",
+           (disk.sessions().get("lead-1") or {}).get("status") == "launching", f"{disk.sessions().get('lead-1')}")
+    screenshot(page, screenshots, "launching")
+    verify("the launch ends: alive in the registry",
+           wait_until(lambda: (disk.sessions().get("lead-1") or {}).get("status") == "alive", LAUNCH_S + WAIT_S))
+    verify("… and alive in the DOM, without an operation",
+           appears(page, '[data-position="lead"] [data-session="lead-1"][data-status="alive"]:not([data-operation])'))
+    same_as_disk(page, disk, "after the launch")
+
+
+def run_scenario(folder, grants, scenario_function, screenshots, page_errors, loop_environment=None):
+    """A state root under the folder with a copy of the grants, the loop and the view on it, and the
+    scenario driven in a page of its own."""
+    state = folder / "state"
+    (state / "grants").mkdir(parents=True)
+    for grant in grants.glob("*.json"):
+        shutil.copy(grant, state / "grants" / grant.name)
+    environment = loop_environment(state) if loop_environment else None
+    processes = Processes(state, folder, environment)
+    try:
+        processes.start_loop()
+        processes.start_view()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1400, "height": 1000})
+            page.on("pageerror", lambda error: page_errors.append(str(error)))
+            scenario_function(page, processes, Disk(state), screenshots)
+            browser.close()
+    finally:
+        processes.stop()
+        subprocess.run(["pkill", "-9", "-f", str(state / "fake-bin" / "claude")], capture_output=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--screenshots", type=Path)
@@ -400,24 +468,12 @@ def main():
     if args.screenshots:
         args.screenshots.mkdir(parents=True, exist_ok=True)
     folder = Path(tempfile.mkdtemp(prefix="antfarm-loop-view-"))
-    state = folder / "state"
-    (state / "grants").mkdir(parents=True)
-    for grant in GRANTS.glob("*.json"):
-        shutil.copy(grant, state / "grants" / grant.name)
-    processes = Processes(state, folder)
+    page_errors = []
     try:
-        processes.start_loop()
-        processes.start_view()
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
-            page = browser.new_page(viewport={"width": 1400, "height": 1000})
-            page_errors = []
-            page.on("pageerror", lambda error: page_errors.append(str(error)))
-            scenario(page, processes, Disk(state), args.screenshots)
-            verify("no JavaScript error in the page", not page_errors, "; ".join(page_errors))
-            browser.close()
+        run_scenario(folder / "script", GRANTS, scenario, args.screenshots, page_errors)
+        run_scenario(folder / "fake", FAKE_GRANTS, launching_scenario, args.screenshots, page_errors, fake_claude)
+        verify("no JavaScript error in the pages", not page_errors, "; ".join(page_errors))
     finally:
-        processes.stop()
         if args.keep:
             print(f"--keep: the temporary folder stays in {folder}")
         else:

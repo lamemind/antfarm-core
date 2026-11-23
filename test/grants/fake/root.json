@@ -1,0 +1,11 @@
+{
+  "position": "root",
+  "description": "Radice dei collaudi di concorrenza: sessione llm servita dal claude finto (test/fake-claude.py).",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 1000000,
+  "launch": {
+    "type": "llm",
+    "prompt": "Sessione {session} del claude finto: nessun modello la legge."
+  }
+}

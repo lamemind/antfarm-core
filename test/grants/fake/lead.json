@@ -1,0 +1,11 @@
+{
+  "position": "lead",
+  "description": "Figlia della radice con tetto 20: i lanci concorrenti dei collaudi, serviti dal claude finto.",
+  "parent": "root",
+  "max_sessions": 20,
+  "budget_tokens": 1000000,
+  "launch": {
+    "type": "llm",
+    "prompt": "Sessione {session} del claude finto: nessun modello la legge."
+  }
+}
