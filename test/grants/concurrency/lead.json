@@ -1,0 +1,12 @@
+{
+  "position": "lead",
+  "description": "Figlia della radice con tetto 3: le tre sessioni lanciate insieme dalla prova di concorrenza.",
+  "parent": "root",
+  "max_sessions": 3,
+  "budget_tokens": 300000,
+  "launch": {
+    "type": "llm",
+    "model": "haiku",
+    "prompt": "Sei la sessione {session} di una prova. Rispondi solo: pronto. Non usare strumenti."
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "position": "root",
+  "description": "Radice della prova di concorrenza su haiku: chiede tre spawn su lead con un comando solo.",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 300000,
+  "launch": {
+    "type": "llm",
+    "model": "haiku",
+    "prompt": "Sei la sessione {session}, sulla posizione {position} di un organigramma di antfarm. Il tuo solo strumento è Bash, e in Bash il solo comando permesso è {request}. Esegui con Bash, in un solo comando, esattamente questo: `{request} spawn lead && {request} spawn lead && {request} spawn lead`. Poi finisci il turno senza fare altro."
+  }
+}
