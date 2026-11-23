@@ -349,6 +349,7 @@ def loop_launch(loop_module, loop, case, wake):
     engine does not write it."""
     session_id, operation = loop.reserve("root", {"kind": "human", "session": None}, None, f"probe-{case}")
     loop.submit(operation)
+    loop.settle()
     if session_id not in loop.sessions():
         return {"error": f"spawn failed: {(loop_row(loop_module, 'spawn-failed') or {}).get('detail')}"}
     entry = loop.sessions()[session_id]
@@ -361,6 +362,7 @@ def loop_launch(loop_module, loop, case, wake):
         return result
     old_pid = entry["pid"]
     loop.wake(session_id)
+    loop.settle()
     wake_row = loop_row(loop_module, "wake", session_id)
     if wake_row is None:
         result["wake"] = {"error": (loop_row(loop_module, "wake-failed", session_id) or {}).get("detail")}

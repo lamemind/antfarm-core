@@ -460,7 +460,8 @@ class Match:
 
 def session_states():
     """short id → entry of `claude agents --json`, for the live sessions."""
-    output = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=60)
+    output = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=60,
+                            start_new_session=True)
     try:
         return {entry["id"]: entry for entry in json.loads(output.stdout) if entry.get("id")}
     except json.JSONDecodeError:

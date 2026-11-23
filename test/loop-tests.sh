@@ -171,6 +171,10 @@ loopstate.deposit_message(loopstate.Paths(sys.argv[2]), sys.argv[3], "human", sy
 PY2
 }
 
+process_ended() { # <pid>: the process is gone, or a zombie that its parent has not collected yet
+  [[ ! -e /proc/$1/stat ]] || [[ $(sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f1) == Z ]]
+}
+
 kill_session() { # <session>: kills the process group of a script session, as a crash would
   kill -9 -- "-$(session_field "$1" pid)" 2>/dev/null
 }
@@ -426,8 +430,8 @@ start_loop
 verify "lead-1 spends 600" wait_for 5 grep -qx 600 "$STATE/loop/work/lead-1/tokens.txt"
 verify "… lead-2 alive, waiting in its mailbox" wait_for 5 session_alive lead-2
 # The loop paused between two cycles: lead-2 reads its message and spends while the loop does not
-# look. At the next cycle the halt closes lead-2 before the loop notices the read, so the received
-# row of lead-2 comes after its closed row, and only read_ts says that the read came first.
+# look. At the next cycle the halt hands the stops to the workers and the loop notices the read; the
+# closed rows come when the stops are applied, and read_ts says that the read came before them.
 kill -STOP "$LOOP_PID"
 message_for lead lead-2 "spend 600"
 verify "with the loop paused, lead-2 reads its message and spends 600" \
@@ -439,9 +443,8 @@ verify "… the switch of lead is off" switch_is lead False
 verify "… both sessions closed at once, reason halt-budget" \
   wait_for 3 rows_are 2 event=closed position=lead reason=halt-budget
 verify "… and their processes are gone" bash -c "! kill -0 $(session_field lead-1 pid) 2>/dev/null && ! kill -0 $(session_field lead-2 pid) 2>/dev/null"
-verify "the read of lead-2 gets its received row after the closed row of lead-2" \
-  wait_for 3 read_logged_after_close lead-2
-verify "… with read_ts earlier than the ts of the closed row" read_before_close lead-2
+verify "the read of lead-2 has read_ts earlier than the ts of its closed row" \
+  wait_for 3 read_before_close lead-2
 verify "every received row carries read_ts, not later than its ts; ts in write order" log_times_consistent
 "$LOOP" switch lead on > /dev/null
 verify "switched on again with the same budget → halted again" rows_are 2 event=halt position=lead reason=budget
@@ -456,6 +459,19 @@ verify "the budget raised in the grant → grants-loaded" wait_for 10 rows_are 2
 sleep 1
 verify "… switched on, it stays on" switch_is lead True
 verify "… no new halt" rows_are 2 event=halt position=lead
+# The loop paused again: lead-3 reads a message and exits while the loop does not look. At the next
+# cycle the loop finds its process gone before it notices the read, so the received row comes after
+# the closed row, and only read_ts says that the read came first.
+"$LOOP" spawn lead > /dev/null
+verify "lead-3 alive" wait_for 5 session_alive lead-3
+LEAD3_PID=$(session_field lead-3 pid)
+kill -STOP "$LOOP_PID"
+message_for lead lead-3 "exit"
+verify "with the loop paused, lead-3 reads its message and exits" wait_for 5 process_ended "$LEAD3_PID"
+kill -CONT "$LOOP_PID"
+verify "the read of lead-3 gets its received row after the closed row of lead-3" \
+  wait_for 3 read_logged_after_close lead-3
+verify "… with read_ts earlier than the ts of the closed row" read_before_close lead-3
 stop_loop
 
 echo "loop: the loop dies, the sessions do not"

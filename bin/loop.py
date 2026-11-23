@@ -21,11 +21,18 @@ its mailbox and the session has ended its turn: `claude stop`, then `claude --bg
 flags, which continues the same session with the options saved at launch. A session of type script
 is a local process, for the tests.
 
-A launch, a wake and a stop are operations: commands that wait on Claude Code or on a process. At
-most --concurrency of them run at once, CONCURRENCY when the argument is absent. A session decided
+A launch, a wake and a stop are operations: commands that wait on Claude Code or on a process. They
+run in worker threads, at most --concurrency at once (CONCURRENCY when the argument is absent), so
+that the cycle — decisions, delivery, budget, status — never waits for them; a stop starts before
+the launches and the wakes that wait, and `claude agents --json`, which tells whether a session has
+ended its turn, runs as an operation too. The workers only run the commands: the main thread
+applies their outcomes at the next cycle, and it alone writes the registry, the switches, the
+requests and the log. One operation per session at a time: a stop asked while a launch or a wake
+runs follows it, and a wake does not resume if the stop arrives before the resume. A session decided
 and not yet launched is in the registry with status `launching`: it holds a place of the cap of its
 position and can receive a message, and the request that asked for it stays among the pending ones
-with a `launching` mark until the launch ends. A session with an operation queued or running carries
+with a `launching` mark until the launch ends — `request spawn` answers on the mark, so a session
+that asks four spawns one after the other gets four launches that run together. A session with an operation queued or running carries
 it in the `operation` field of its entry: `launch`, `wake` or `stop`, and since when. The log writes a
 row when an operation is handed over (`launching`, `waking`, `stopping`) and one when it ends
 (`spawn`, `wake`, `closed`), and the second one carries `started_ts`, the time the operation began.
@@ -50,13 +57,21 @@ A position has a cap of live sessions and a budget of tokens. A spawn over the c
 queue until a session of the position closes. A position whose sessions, alive and closed, have
 spent more than its budget goes back to neutral: switch off, live sessions stopped at once. It goes
 back on only after someone raises the budget in its grant; otherwise the loop switches it off again.
+On a position switched off — by the human or by the budget — the launches and the wakes not yet
+started are withdrawn, and a withdrawn spawn waits in the queue again.
 
 The loop dies without killing its sessions, and a restart takes them back. An LLM session is a
 child of the Claude Code background service, not of the loop; a script session runs in a process
 session of its own. At every start the loop is in neutral again — it does not remember which
 switches were on —, adopts every session of its registry whose process is still alive, with a
 `recovered` row and no new spawn, marks closed the ones that died in the meantime, and rejects the
-switch requests deposited while it was down. A second loop on the same state root does not start.
+switch requests deposited while it was down. It takes up the operations the death interrupted: a
+session left `launching` is looked for by its name, unique for every launch, and adopted with a
+`recovered` row if it was born, otherwise its request is decided again; a session left in a wake is
+looked for by its short id, which the resume does not change; a stop is repeated. A second loop on
+the same state root does not start. On SIGTERM or SIGINT the loop starts no new operation, withdraws
+the ones not started — a spawn request stays pending, a stop stays written on its session for the
+next start —, waits for the running ones and applies their outcomes.
 
 The loop rereads the grants at every cycle: a changed directory that validate-grants.py accepts
 takes effect without a restart; an invalid one does not stop the loop, which keeps the last valid
@@ -71,9 +86,11 @@ import argparse
 import fcntl
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -100,6 +117,11 @@ PENDING_MARKS = ("queued", "launching")
 BASH_TIMEOUT_MS = 900000
 LAUNCH_TIMEOUT_S = 120
 STOP_WAIT_S = 30
+# After a restart, how long a launch that left no output is looked for by its name among the sessions
+# of `claude agents --json`, before the loop takes it as never born and decides its request again.
+RECOVERY_LOOKUP_S = 10
+# The variable that carries the launch id in the environment of a script session.
+LAUNCH_ID_VARIABLE = "ANTFARM_LAUNCH_ID"
 DECISION_WAIT_S = 5
 # The one line the loop writes into a session it wakes; it reaches an LLM, so it is in Italian.
 WAKE_TEXT = "Il loop ti sveglia: nella tua casella c'è un messaggio per te. Leggilo con `{request} recv`."
@@ -115,12 +137,16 @@ class LaunchError(Exception):
     pass
 
 
-# <editor-fold defaultstate="collapsed" desc="Operations: launch, wake, stop">
+# <editor-fold defaultstate="collapsed" desc="Operations and workers">
 class Operation:
-    """One command on a session that waits on Claude Code or on a process: a launch, a wake or a
-    stop. It carries a copy of the data it needs, never the registry: running it touches only the
-    processes and loop/records/<session>/. The loop applies its outcome to the registry and the
-    log, because loopstate.write_json holds one writer per file in a process."""
+    """One command that waits on Claude Code or on a process: the launch, the wake or the stop of a
+    session, the recovery of a launch or of a wake that a restart interrupted, the read of the
+    session states. It carries a copy of the data it needs, never the registry: running it touches
+    only the processes and loop/records/<session>/. The loop applies its outcome to the registry
+    and the log, because loopstate.write_json holds one writer per file in a process.
+
+    `stop_reason` is a stop asked while the operation runs. The loop writes it and the worker reads
+    it: a wake checks it between `claude stop` and the resume, and does not resume."""
 
     def __init__(self, kind, session_id, **data):
         self.kind = kind
@@ -128,6 +154,7 @@ class Operation:
         self.data = data
         self.started_ts = None
         self.outcome = None
+        self.stop_reason = None
 
     def run(self):
         """Runs the operation and keeps its outcome: a dict, with `error` when it failed. An
@@ -141,19 +168,114 @@ class Operation:
         return self
 
 
+class Workers:
+    """`size` threads that run the operations, one each: at most `size` operations at once. The
+    ones waiting start in order, the stops before the launches and the wakes, so that a stop for
+    the budget does not wait behind the launches. An operation ended goes on the queue of the
+    outcomes, which the loop empties at every cycle."""
+
+    def __init__(self, size):
+        self.condition = threading.Condition()
+        self.waiting = []
+        self.running = set()
+        self.closed = False
+        self.outcomes = queue.SimpleQueue()
+        self.threads = [threading.Thread(target=self.serve, name=f"worker-{number}", daemon=True)
+                        for number in range(1, size + 1)]
+        for thread in self.threads:
+            thread.start()
+
+    def submit(self, operation):
+        """Queues the operation; False once the workers are closed, and then it never runs."""
+        with self.condition:
+            if self.closed:
+                return False
+            stops = sum(1 for waiting in self.waiting if waiting.kind == "stop")
+            self.waiting.insert(stops if operation.kind == "stop" else len(self.waiting), operation)
+            self.condition.notify()
+            return True
+
+    def withdraw(self, operation):
+        """True if the operation had not started: it leaves the queue and never runs."""
+        with self.condition:
+            if operation in self.waiting:
+                self.waiting.remove(operation)
+                return True
+            return False
+
+    def serve(self):
+        while True:
+            with self.condition:
+                while not self.waiting and not self.closed:
+                    self.condition.wait()
+                if not self.waiting:
+                    return
+                operation = self.waiting.pop(0)
+                self.running.add(operation)
+            operation.run()
+            self.outcomes.put(operation)
+            with self.condition:
+                self.running.discard(operation)
+
+    def ended(self):
+        """The operations ended since the last call, in the order they ended."""
+        found = []
+        while True:
+            try:
+                found.append(self.outcomes.get_nowait())
+            except queue.Empty:
+                return found
+
+    def counts(self):
+        with self.condition:
+            return {"waiting": len(self.waiting), "running": len(self.running)}
+
+    def close(self):
+        """No operation starts from now on: returns the ones that had not started. The running ones
+        go on to the end."""
+        with self.condition:
+            self.closed = True
+            withdrawn, self.waiting = self.waiting, []
+            self.condition.notify_all()
+            return withdrawn
+
+
+def run_logged(command, cwd, output_path, timeout_s):
+    """(exit code, output) of a `claude --bg` command whose output goes to a file of the records,
+    in a process session of its own. The file is not a pipe to the loop, so a `kill -9` of the loop
+    does not break the command, and a Ctrl-C in the loop's terminal does not reach it: the command
+    reaches its end, and the restarted loop reads the file (test/probe-launch-recovery.py)."""
+    with open(output_path, "w", encoding="utf-8") as output:
+        process = subprocess.Popen(command, cwd=cwd, env=libmatch.launch_environment(), stdin=subprocess.DEVNULL,
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        code = process.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise LaunchError(f"{' '.join(command[:2])} does not end within {timeout_s} s") from None
+    return code, Path(output_path).read_text(encoding="utf-8", errors="replace")
+
+
+def claude(*arguments):
+    """A `claude` command that is not a launch, in a process session of its own, like the launches."""
+    return subprocess.run(["claude", *arguments], capture_output=True, text=True, timeout=60, start_new_session=True)
+
+
 def run_launch(operation):
     launch, records, state = operation.data["launch"], operation.data["records"], operation.data["state"]
     if launch["type"] == "script":
-        return launch_script(launch, records, state)
+        return launch_script(launch, records, state, operation.data["launch_id"])
     return launch_llm(operation.data["name"], launch, records, state)
 
 
 def launch_llm(name, launch, records, state):
     """A Claude Code session in the background, with the flags of the launch template. The state
     root reaches it through the `env` block of --settings, the only environment that always
-    arrives (test/probe-environment.py). The outcome carries `foreign_variables`, for the spawn
-    row and not for the registry. `claude --version` runs here, before the first launch of the
-    process, and its answer stays cached for the loop (match.stale_expected_variables)."""
+    arrives (test/probe-environment.py). The output of `claude --bg` stays in launch.out of the
+    records. The outcome carries `foreign_variables`, for the spawn row and not for the registry.
+    `claude --version` runs here, before the first launch of the process, and its answer stays
+    cached for the loop (match.stale_expected_variables)."""
     libmatch.stale_expected_variables()
     (records / "prompt.txt").write_text(launch["prompt"], encoding="utf-8")
     command = ["claude", "--bg"]
@@ -171,31 +293,34 @@ def launch_llm(name, launch, records, state):
     if launch["model"]:
         command += ["--model", launch["model"]]
     command.append(launch["prompt"])
+    shown = [part if part != launch["prompt"] else "<prompt.txt>" for part in command]
+    libstate.write_json(records / "command.json", shown)
     try:
-        outcome = subprocess.run(command, cwd=launch["cwd"], env=libmatch.launch_environment(),
-                                 capture_output=True, text=True, timeout=LAUNCH_TIMEOUT_S)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        code, output = run_logged(command, launch["cwd"], records / "launch.out", LAUNCH_TIMEOUT_S)
+    except OSError as error:
         raise LaunchError(f"claude --bg does not run: {error}") from error
-    hit = libmatch.LAUNCH_PATTERN.search(outcome.stdout + outcome.stderr)
-    if outcome.returncode != 0 or not hit:
-        raise LaunchError(f"claude --bg exits {outcome.returncode}: {(outcome.stdout + outcome.stderr).strip()[:300]}")
+    hit = libmatch.LAUNCH_PATTERN.search(output)
+    if code != 0 or not hit:
+        raise LaunchError(f"claude --bg exits {code}: {output.strip()[:300]}")
     try:
         entry = libmatch.wait_for_session(hit.group(1))
     except RuntimeError as error:
         raise LaunchError(str(error)) from error
-    return {
-        "type": "llm", "pid": entry["pid"], "starttime": libstate.start_time(entry["pid"]),
-        "sessionId": entry["sessionId"], "short_id": entry["id"], "name": name,
-        "command": [part if part != launch["prompt"] else "<prompt.txt>" for part in command],
-        "foreign_variables": libmatch.foreign_variables(entry["pid"]),
-    }
+    return {**session_fields(entry, name, shown), "foreign_variables": libmatch.foreign_variables(entry["pid"])}
 
 
-def launch_script(launch, records, state):
+def session_fields(entry, name, command):
+    """The fields of the registry for an LLM session, from its entry of `claude agents --json`."""
+    return {"type": "llm", "pid": entry["pid"], "starttime": libstate.start_time(entry["pid"]),
+            "sessionId": entry["sessionId"], "short_id": entry["id"], "name": name, "command": command}
+
+
+def launch_script(launch, records, state, launch_id):
     """A local process in a session of its own: a Ctrl-C in the loop's terminal does not reach
-    it, and the death of the loop does not end it. The outcome carries the Popen object, which
-    the loop keeps to collect the exit."""
-    environment = {**libmatch.launch_environment(), libgraph.STATE_VARIABLE: str(state)}
+    it, and the death of the loop does not end it. Its environment carries the launch id, which
+    finds it again after a restart. The outcome carries the Popen object, which the loop keeps to
+    collect the exit."""
+    environment = {**libmatch.launch_environment(), libgraph.STATE_VARIABLE: str(state), LAUNCH_ID_VARIABLE: launch_id}
     try:
         with open(records / "output.txt", "w", encoding="utf-8") as output:
             process = subprocess.Popen(launch["command"], cwd=launch["cwd"], env=environment,
@@ -210,22 +335,27 @@ def launch_script(launch, records, state):
 def run_wake(operation):
     """`claude stop`, then `claude --bg --resume <sessionId>` without flags: the same session,
     with the options saved at launch, and a new process. A resume with flags, or on a session
-    whose process is still alive, would start a copy (test/probe-resume.py, measures 1 and 2)."""
+    whose process is still alive, would start a copy (test/probe-resume.py, measures 1 and 2).
+    A stop asked meanwhile is checked between the two: the session stays stopped, `stopped` in
+    the outcome."""
     entry = operation.data["entry"]
     libmatch.stale_expected_variables()
-    subprocess.run(["claude", "stop", entry["short_id"]], capture_output=True, text=True, timeout=60)
+    claude("stop", entry["short_id"])
     limit = time.monotonic() + STOP_WAIT_S
     while libstate.alive(entry["pid"], entry["starttime"]) and time.monotonic() < limit:
         time.sleep(0.5)
+    if operation.stop_reason:
+        return {"stopped": True}
     text = WAKE_TEXT.replace("{request}", str(REQUEST))
-    outcome = subprocess.run(["claude", "--bg", "--resume", entry["sessionId"], text], cwd=entry["cwd"],
-                             env=libmatch.launch_environment(), capture_output=True, text=True,
-                             timeout=LAUNCH_TIMEOUT_S)
-    hit = libmatch.LAUNCH_PATTERN.search(outcome.stdout + outcome.stderr)
-    if outcome.returncode != 0 or not hit:
-        raise LaunchError(f"claude --bg --resume exits {outcome.returncode}: {(outcome.stdout + outcome.stderr).strip()[:300]}")
+    records = Path(operation.data["records"])
+    records.mkdir(parents=True, exist_ok=True)
+    code, output = run_logged(["claude", "--bg", "--resume", entry["sessionId"], text], entry["cwd"],
+                              records / "wake.out", LAUNCH_TIMEOUT_S)
+    hit = libmatch.LAUNCH_PATTERN.search(output)
+    if code != 0 or not hit:
+        raise LaunchError(f"claude --bg --resume exits {code}: {output.strip()[:300]}")
     if hit.group(1) != entry["short_id"]:
-        subprocess.run(["claude", "stop", hit.group(1)], capture_output=True, text=True, timeout=60)
+        claude("stop", hit.group(1))
         raise LaunchError(f"the resume started a copy, {hit.group(1)}, instead of continuing {entry['short_id']}")
     resumed = libmatch.wait_for_session(hit.group(1))
     return {"pid": resumed["pid"], "starttime": libstate.start_time(resumed["pid"]),
@@ -236,10 +366,10 @@ def run_stop(operation):
     """`claude stop` for an LLM session, SIGTERM to the process group of a script session — its
     `request recv` too, which would otherwise outlive it —, then the wait for the end of the
     process, up to HALT_WAIT_S. The session is closed whatever the wait finds."""
-    entry, child = operation.data["entry"], operation.data["child"]
+    entry, child = operation.data["entry"], operation.data.get("child")
     if entry["type"] == "llm":
         try:
-            subprocess.run(["claude", "stop", entry["short_id"]], capture_output=True, text=True, timeout=60)
+            claude("stop", entry["short_id"])
         except (OSError, subprocess.TimeoutExpired):
             pass
     elif libstate.alive(entry["pid"], entry["starttime"]):
@@ -257,7 +387,85 @@ def run_stop(operation):
     return {}
 
 
-RUNNERS = {"launch": run_launch, "wake": run_wake, "stop": run_stop}
+def run_states(_operation):
+    """The states of the live sessions, from `claude agents --json`: which ones have ended their turn."""
+    return {"states": libmatch.session_states()}
+
+
+def wait_while_running(words, limit_s):
+    """Waits until no process carries all the words among the arguments of its command line, up to
+    limit_s; the ones still there at the end are killed, as a launch past LAUNCH_TIMEOUT_S is. A
+    restarted loop waits so for a `claude --bg`, a resume or a `claude stop` that its previous
+    process left running: the words name that command only — the unique name of a launch, `--resume`
+    and a sessionId, `stop` and a short id."""
+    limit = time.monotonic() + limit_s
+    while libstate.processes_with_arguments(words):
+        if time.monotonic() >= limit:
+            for pid in libstate.processes_with_arguments(words):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return
+        time.sleep(0.5)
+
+
+def run_recover_launch(operation):
+    """A session left `launching` by a previous loop: was it born? An LLM session: its `claude
+    --bg` may still run, and the loop waits for it; then its short id from launch.out, or its
+    name — unique, it carries the launch id — among the sessions of `claude agents --json`. A
+    script session: the session leader whose environment carries the launch id. The outcome
+    carries the fields of the registry, or `born` False."""
+    entry, records = operation.data["entry"], Path(operation.data["records"])
+    if entry["type"] == "script":
+        found = libstate.session_leader_with(LAUNCH_ID_VARIABLE, entry["launch_id"]) if entry.get("launch_id") else None
+        if found is None:
+            return {"born": False}
+        pid, starttime = found
+        return {"born": True, "pid": pid, "starttime": starttime}
+    name = entry.get("name")
+    if not name:
+        return {"born": False}
+    wait_while_running(("--bg", name), LAUNCH_TIMEOUT_S)
+    try:
+        output = (records / "launch.out").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        output = ""
+    command = libstate.read_json(records / "command.json")
+    hit = libmatch.LAUNCH_PATTERN.search(output)
+    candidate = None
+    if hit and name in output:
+        try:
+            candidate = libmatch.wait_for_session(hit.group(1))
+        except RuntimeError:
+            candidate = None
+    limit = time.monotonic() + RECOVERY_LOOKUP_S
+    while candidate is None and time.monotonic() < limit:
+        candidate = next((state for state in libmatch.session_states().values()
+                          if state.get("name") == name and state.get("pid") and state.get("sessionId")), None)
+        if candidate is None:
+            time.sleep(1)
+    if candidate is None or candidate.get("name") != name:
+        return {"born": False}
+    return {"born": True, **session_fields(candidate, name, command)}
+
+
+def run_recover_wake(operation):
+    """A session whose wake a previous loop left halfway: its `claude stop` or its resume may still
+    run, and the loop waits for them; then the session by its short id, which the resume does not
+    change. Found alive: the pid it has now, new if the resume happened. Not found: stopped and
+    not resumed, `found` False."""
+    entry = operation.data["entry"]
+    wait_while_running(("stop", entry["short_id"]), LAUNCH_TIMEOUT_S)
+    wait_while_running(("--resume", entry["sessionId"]), LAUNCH_TIMEOUT_S)
+    state = libmatch.session_states().get(entry["short_id"])
+    if not state or not state.get("pid"):
+        return {"found": False}
+    return {"found": True, "pid": state["pid"], "starttime": libstate.start_time(state["pid"])}
+
+
+RUNNERS = {"launch": run_launch, "wake": run_wake, "stop": run_stop, "states": run_states,
+           "recover-launch": run_recover_launch, "recover-wake": run_recover_wake}
 # </editor-fold>
 
 
@@ -282,6 +490,12 @@ class Loop:
         self.started = None
         self.lock_file = None
         self.expected_variables_checked = False
+        self.workers = Workers(concurrency)
+        # The operation of every session that has one, queued or running, until its outcome is
+        # applied: one per session at a time.
+        self.in_flight = {}
+        self.states_operation = None
+        self.states_error = None
 
     # <editor-fold defaultstate="collapsed" desc="Log">
     def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None,
@@ -405,7 +619,8 @@ class Loop:
         here it holds a place of the cap, and it can receive a message. A text becomes the first
         message of the session, in the position mailbox, and `waiting` — (path, message) of a
         message already in the mailbox — is addressed to it: both before the launch, so that the
-        session finds them at its first `request recv`."""
+        session finds them at its first `request recv`. The launch id makes the name of an LLM
+        session unique, and finds the session again after a restart (run_recover_launch)."""
         session_id = self.next_session_id(position)
         values = {"request": REQUEST, "code": CODE_ROOT, "state": self.paths.state,
                   "session": session_id, "position": position}
@@ -421,18 +636,21 @@ class Loop:
             waiting[1].update(to_session=session_id, delivered=libstate.now(), rule="spawn")
             libstate.write_json(waiting[0], waiting[1])
         decided = libstate.now()
+        launch_id = libstate.new_id("l")
         entry = {"id": session_id, "position": position, "type": launch["type"], "status": "launching",
-                 "cwd": launch["cwd"], "decided": decided, "launched_by": launched_by, "request": request_id,
-                 "reason": reason, "first_message": first_message, "wakes": 0,
+                 "launch_id": launch_id, "cwd": launch["cwd"], "decided": decided, "launched_by": launched_by,
+                 "request": request_id, "reason": reason, "first_message": first_message, "wakes": 0,
                  "operation": {"kind": "launch", "since": decided}}
         if launch["type"] == "llm":
-            entry["name"] = f"antfarm loop · {position} · {session_id}"
+            entry["name"] = f"antfarm loop · {position} · {session_id} · {launch_id}"
+        else:
+            entry["command"] = launch["command"]
         self.sessions()[session_id] = entry
         self.save_registry()
         self.log("launching", position=position, session=session_id, request=request_id,
                  sender=launched_by.get("session") or launched_by["kind"], reason=reason, detail=launch["type"])
         return session_id, Operation("launch", session_id, launch=launch, records=records, state=self.paths.state,
-                                     name=entry.get("name"))
+                                     name=entry.get("name"), launch_id=launch_id)
 
     def unreserve(self, session_id):
         """Removes a session whose launch will not happen. Its first message disappears; the other
@@ -457,18 +675,85 @@ class Loop:
         return unassigned
 
     def submit(self, operation):
-        """Runs the operation and applies its outcome."""
-        self.apply(operation.run())
+        """Hands the operation to the workers. The operation of a session stays in `in_flight`
+        until its outcome is applied; the read of the states runs one at a time. Once the loop is
+        shutting down the workers take nothing more, and the operation is withdrawn at once."""
+        if not self.workers.submit(operation):
+            self.withdrawn(operation, "shutdown")
+            return
+        if operation.kind == "states":
+            self.states_operation = operation
+        else:
+            self.in_flight[operation.session_id] = operation
 
-    def apply(self, operation):
-        """The outcome of an operation, written into the registry and the log: only this thread
-        writes them."""
-        {"launch": self.launched, "wake": self.woken, "stop": self.stopped}[operation.kind](operation)
+    def forget(self, operation):
+        if operation.kind == "states":
+            self.states_operation = None
+        elif self.in_flight.get(operation.session_id) is operation:
+            del self.in_flight[operation.session_id]
+
+    def apply_outcomes(self):
+        """The outcomes of the operations ended since the last cycle, in the order they ended,
+        written into the registry and the log: only this thread writes them."""
+        for operation in self.workers.ended():
+            self.forget(operation)
+            handlers = {"launch": self.launched, "wake": self.woken, "stop": self.stopped,
+                        "states": self.states_read, "recover-launch": self.launch_recovered,
+                        "recover-wake": self.wake_recovered}
+            handlers[operation.kind](operation)
+
+    def settle(self):
+        """Waits until every operation handed over has ended, and applies the outcomes; a running
+        loop keeps its heartbeat meanwhile. For the shutdown, and for a probe that drives a Loop."""
+        while self.in_flight or self.states_operation is not None:
+            self.apply_outcomes()
+            if self.in_flight or self.states_operation is not None:
+                if self.started:
+                    self.write_status()
+                time.sleep(min(self.cycle_s, 0.2))
+
+    def withdrawn(self, operation, reason):
+        """An operation that will not run: its position was switched off (`switched-off`), or the
+        loop is shutting down (`shutdown`). A launch gives back its reservation, and its spawn
+        request returns among the pending ones — queued for a switch, without marks for the next
+        start; a wake leaves the session as it was; a stop and a recovery stay written on the
+        session, and the next start runs them again."""
+        self.forget(operation)
+        entry = self.sessions().get(operation.session_id) if operation.session_id else None
+        if entry is None:
+            return
+        detail = {"launch": "launch: the reservation is given back", "wake": "wake: the session stays as it is",
+                  "stop": "stop: the next start repeats it"}.get(operation.kind, f"{operation.kind}: the next start repeats it")
+        if operation.kind == "launch":
+            self.unreserve(operation.session_id)
+        elif operation.kind == "wake":
+            entry.pop("operation", None)
+            self.save_registry()
+        self.log("withdrawn", position=entry["position"], session=operation.session_id, request=entry.get("request"),
+                 reason=reason, detail=detail)
+        if operation.kind != "launch" or entry["reason"] != "request":
+            return
+        found = self.pending_request(entry["request"])
+        if found is None:
+            return
+        path, request = found
+        if reason == "switched-off":
+            self.queue(path, request, "switched-off", f"l'interruttore di {entry['position']} è spento")
+        else:
+            libstate.write_json(path, {field: value for field, value in request.items() if field not in PENDING_MARKS})
+
+    def withdraw_position(self, position):
+        """On a position switched off the loop stops launching and waking: the launches and the
+        wakes not yet started are withdrawn. The running ones reach their end."""
+        for session_id in self.live_sessions(position):
+            operation = self.in_flight.get(session_id)
+            if operation is not None and operation.kind in ("launch", "wake") and self.workers.withdraw(operation):
+                self.withdrawn(operation, "switched-off")
 
     def launched(self, operation):
         """The reservation becomes a live session, or disappears if the launch failed: then a
         spawn request is decided as failed, and the message of an escalation stays held in the
-        mailbox, for the delivery to try again."""
+        mailbox, for the delivery to try again. A stop asked during the launch follows it."""
         session_id = operation.session_id
         entry = self.sessions()[session_id]
         outcome = dict(operation.outcome)
@@ -490,15 +775,20 @@ class Loop:
         if process is not None:
             self.children[session_id] = process
         foreign = outcome.pop("foreign_variables", None)
-        entry.update(outcome, status="alive", launched=libstate.now())
-        for field in ("operation", "first_message"):
-            entry.pop(field, None)
-        self.save_registry()
+        self.make_alive(entry, outcome)
         self.log("spawn", position=entry["position"], session=session_id, request=entry["request"], sender=sender,
                  reason=entry["reason"], detail=f"{entry['type']} pid {entry['pid']}", foreign_variables=foreign,
                  started_ts=operation.started_ts)
         if entry["reason"] == "request":
             self.finish_pending(entry["request"], "spawned", session=session_id)
+        if operation.stop_reason:
+            self.stop_session(session_id, operation.stop_reason)
+
+    def make_alive(self, entry, fields):
+        entry.update(fields, status="alive", launched=libstate.now())
+        for field in ("operation", "first_message"):
+            entry.pop(field, None)
+        self.save_registry()
 
     def note_stale_expected_variables(self):
         """Once per process, at the first launch or wake of an LLM session: when `claude --version`
@@ -511,6 +801,13 @@ class Loop:
         line = libmatch.stale_expected_variables()
         if line:
             self.log("expected-variables-stale", detail=line)
+
+    def shut_down(self):
+        """On SIGTERM or SIGINT: no operation starts from now on, the ones not started are
+        withdrawn, the running ones reach their end and their outcomes are applied."""
+        for operation in self.workers.close():
+            self.withdrawn(operation, "shutdown")
+        self.settle()
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Requests">
@@ -605,6 +902,8 @@ class Loop:
         on = bool(request.get("on"))
         self.set_switch(position, on, "human")
         self.log("switch-on" if on else "switch-off", position=position, request=request["id"], sender=HUMAN)
+        if not on:
+            self.withdraw_position(position)
         if on and self.over_budget(position):
             self.finish(path, request, "halted")
             return
@@ -755,7 +1054,9 @@ class Loop:
     def session_tokens(self, entry):
         """The tokens a session has spent: for an LLM session the four `usage` fields of its
         transcript, each `message.id` counted once (observe.py); for a script session the number
-        it writes in tokens.txt of its working directory."""
+        it writes in tokens.txt of its working directory. A session being launched has spent nothing."""
+        if entry["status"] == "launching":
+            return 0
         if entry["type"] == "script":
             try:
                 return int((Path(entry["cwd"]) / SCRIPT_TOKENS).read_text(encoding="utf-8").strip() or 0)
@@ -807,8 +1108,27 @@ class Loop:
 
     def stop_session(self, session_id, reason):
         """Hands the stop of a live session to an operation (run_stop); the session is closed when
-        its outcome is applied."""
+        its outcome is applied. One operation per session at a time: a launch or a wake not yet
+        started is withdrawn, and a withdrawn launch leaves nothing to stop; an operation already
+        running reaches its end, and the stop follows it — a wake does not resume, if the stop
+        arrives before the resume. The stop that waits is written on the session too, for a
+        restart."""
         entry = self.sessions()[session_id]
+        operation = self.in_flight.get(session_id)
+        if operation is not None and operation.kind == "stop":
+            return
+        if operation is not None:
+            if operation.kind in ("launch", "wake") and self.workers.withdraw(operation):
+                self.withdrawn(operation, "switched-off")
+                if operation.kind == "launch":
+                    return
+            else:
+                operation.stop_reason = reason
+                entry["operation"]["stop"] = reason
+                self.save_registry()
+                self.log("stopping", position=entry["position"], session=session_id, reason=reason,
+                         detail=f"after the {operation.kind} in progress")
+                return
         entry["operation"] = {"kind": "stop", "since": libstate.now(), "reason": reason}
         self.save_registry()
         self.log("stopping", position=entry["position"], session=session_id, reason=reason)
@@ -883,18 +1203,33 @@ class Loop:
         return [message for _, message in libstate.pending_messages(self.paths, position)
                 if message.get("to_session") == session_id]
 
+    def wake_candidates(self):
+        """The LLM sessions to wake if they have ended their turn: alive, without an operation, on a
+        position switched on, with a message waiting. A script session reads its mailbox by itself
+        and needs no wake."""
+        return [session_id for session_id, entry in self.sessions().items()
+                if entry["status"] == "alive" and entry["type"] == "llm" and not entry.get("operation")
+                and self.is_on(entry["position"]) and self.unread(session_id, entry["position"])]
+
     def wake_sessions(self):
-        """Wakes the LLM sessions that have a message waiting and have ended their turn, on the
-        positions switched on. A script session reads its mailbox by itself and needs no wake, and
-        a session with an operation already has one."""
-        candidates = [(session_id, entry) for session_id, entry in self.sessions().items()
-                      if entry["status"] == "alive" and entry["type"] == "llm" and not entry.get("operation")
-                      and self.is_on(entry["position"]) and self.unread(session_id, entry["position"])]
-        if not candidates:
+        """Asks the states of the sessions to an operation (run_states), when a session waits for a
+        wake and no read of the states is under way; states_read wakes the ones that have ended
+        their turn."""
+        if self.states_operation is None and self.wake_candidates():
+            self.submit(Operation("states", None))
+
+    def states_read(self, operation):
+        if self.stopping:
             return
-        states = libmatch.session_states()
-        for session_id, entry in candidates:
-            if states.get(entry["short_id"], {}).get("status") == "idle":
+        if "error" in operation.outcome:
+            if self.states_error != operation.outcome["error"]:
+                self.states_error = operation.outcome["error"]
+                self.log("states-failed", detail=f"claude agents --json: {operation.outcome['error']}")
+            return
+        self.states_error = None
+        states = operation.outcome["states"]
+        for session_id in self.wake_candidates():
+            if states.get(self.sessions()[session_id]["short_id"], {}).get("status") == "idle":
                 self.wake(session_id)
 
     def wake(self, session_id):
@@ -903,15 +1238,22 @@ class Loop:
         entry["operation"] = {"kind": "wake", "since": libstate.now()}
         self.save_registry()
         self.log("waking", position=entry["position"], session=session_id)
-        self.submit(Operation("wake", session_id, entry=dict(entry)))
+        self.submit(Operation("wake", session_id, entry=dict(entry), records=self.paths.records / session_id))
 
     def woken(self, operation):
-        """The session continues with a new process, or is closed if the wake failed."""
+        """The session continues with a new process, or is closed if the wake failed, or if a stop
+        arrived before the resume. A stop asked after the resume follows the wake."""
         session_id = operation.session_id
         entry = self.sessions()[session_id]
         outcome = operation.outcome
         self.note_stale_expected_variables()
         entry.pop("operation", None)
+        if outcome.get("stopped"):
+            entry.update(status="closed", closed=libstate.now(), close_reason=operation.stop_reason)
+            self.save_registry()
+            self.log("closed", position=entry["position"], session=session_id, reason=operation.stop_reason,
+                     detail=f"pid {entry['pid']}, stopped before the resume of its wake", started_ts=operation.started_ts)
+            return
         if "error" in outcome:
             entry.update(status="closed", closed=libstate.now(), close_reason="wake-failed")
             self.save_registry()
@@ -923,6 +1265,8 @@ class Loop:
         self.save_registry()
         self.log("wake", position=entry["position"], session=session_id, detail=f"pid {outcome['pid']}",
                  foreign_variables=outcome["foreign_variables"], started_ts=operation.started_ts)
+        if operation.stop_reason:
+            self.stop_session(session_id, operation.stop_reason)
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Status">
@@ -944,7 +1288,7 @@ class Loop:
         libstate.write_json(self.paths.status, {
             "pid": os.getpid(), "starttime": libstate.start_time(os.getpid()), "started": self.started,
             "heartbeat": libstate.now(), "cycle_s": self.cycle_s, "concurrency": self.concurrency,
-            "code_root": str(CODE_ROOT),
+            "operations": self.workers.counts(), "code_root": str(CODE_ROOT),
             "positions": positions,
             "interpellations_open": sum(1 for path in libstate.entry_files(self.paths.interpellations)
                                         if (libstate.read_json(path) or {}).get("status") == "open"),
@@ -967,10 +1311,25 @@ class Loop:
 
     def adopt(self):
         """The sessions of the registry that a previous loop left alive: a `recovered` row for each
-        one whose process still exists, untouched; the ones that died meanwhile are marked closed."""
+        one whose process still exists, untouched; the ones that died meanwhile are marked closed.
+        The ones it left in an operation take it up again: a launch and a wake are recovered by an
+        operation that finds out what they left (launch_recovered, wake_recovered), a stop is
+        repeated."""
         changed = False
-        for session_id, entry in self.sessions().items():
+        for session_id, entry in list(self.sessions().items()):
+            operation = entry.get("operation") or {}
+            if entry["status"] == "launching":
+                self.submit(Operation("recover-launch", session_id, entry=dict(entry),
+                                      records=self.paths.records / session_id))
+                continue
             if entry["status"] != "alive":
+                continue
+            if operation.get("kind") == "wake":
+                self.submit(Operation("recover-wake", session_id, entry=dict(entry)))
+                continue
+            if operation.get("kind") == "stop":
+                del entry["operation"]
+                self.stop_session(session_id, operation["reason"])
                 continue
             if libstate.alive(entry["pid"], entry["starttime"]):
                 self.log("recovered", position=entry["position"], session=session_id,
@@ -982,6 +1341,81 @@ class Loop:
                      detail=f"pid {entry['pid']}")
         if changed:
             self.save_registry()
+
+    def launch_recovered(self, operation):
+        """A launch that a restart interrupted. Born: the session is adopted with a `recovered` row,
+        and its request decided as spawned. Not born: the reservation is given back, and its request
+        stays among the pending ones without marks, to be decided again — one launch more, never a
+        second session for the same request, because the session would have been found by its
+        name. An error of the recovery keeps the reservation and tries again."""
+        session_id = operation.session_id
+        entry = self.sessions()[session_id]
+        outcome = dict(operation.outcome)
+        stop = (entry.get("operation") or {}).get("stop") or operation.stop_reason
+        if "error" in outcome:
+            self.log("recover-failed", position=entry["position"], session=session_id, detail=outcome["error"],
+                     started_ts=operation.started_ts)
+            self.submit(Operation("recover-launch", session_id, entry=dict(entry), records=operation.data["records"]))
+            return
+        if outcome.pop("born"):
+            self.make_alive(entry, outcome)
+            self.log("recovered", position=entry["position"], session=session_id, request=entry["request"],
+                     reason="launch-interrupted", detail=f"{entry['type']} pid {entry['pid']}",
+                     started_ts=operation.started_ts)
+            if entry["reason"] == "request":
+                self.finish_pending(entry["request"], "spawned", session=session_id)
+            if stop:
+                self.stop_session(session_id, stop)
+            return
+        self.unreserve(session_id)
+        self.log("withdrawn", position=entry["position"], session=session_id, request=entry["request"],
+                 reason="not-born", detail="the launch interrupted by the restart left no session",
+                 started_ts=operation.started_ts)
+        found = self.pending_request(entry["request"]) if entry["reason"] == "request" else None
+        if found is not None:
+            path, request = found
+            libstate.write_json(path, {field: value for field, value in request.items() if field not in PENDING_MARKS})
+
+    def wake_recovered(self, operation):
+        """A wake that a restart interrupted. The session found by its short id: adopted with the
+        pid it has now, which is new if the resume happened. Not found: stopped and not resumed,
+        it is closed, and its message goes back to the position."""
+        session_id = operation.session_id
+        entry = self.sessions()[session_id]
+        outcome = operation.outcome
+        stop = (entry.get("operation") or {}).get("stop") or operation.stop_reason
+        if "error" in outcome:
+            self.log("recover-failed", position=entry["position"], session=session_id, detail=outcome["error"],
+                     started_ts=operation.started_ts)
+            self.submit(Operation("recover-wake", session_id, entry=dict(entry)))
+            return
+        entry.pop("operation", None)
+        if not outcome["found"]:
+            entry.update(status="closed", closed=libstate.now(), close_reason="wake-interrupted")
+            self.save_registry()
+            self.log("closed", position=entry["position"], session=session_id, reason="wake-interrupted",
+                     detail=f"pid {entry['pid']}, stopped and not resumed", started_ts=operation.started_ts)
+            return
+        resumed = (outcome["pid"], outcome["starttime"]) != (entry["pid"], entry["starttime"])
+        entry.update(pid=outcome["pid"], starttime=outcome["starttime"])
+        if resumed:
+            entry.update(wakes=entry.get("wakes", 0) + 1, last_wake=libstate.now())
+        self.save_registry()
+        self.log("recovered", position=entry["position"], session=session_id, reason="wake-interrupted",
+                 detail=f"llm pid {entry['pid']}, " + ("resumed" if resumed else "not stopped"),
+                 started_ts=operation.started_ts)
+        if stop:
+            self.stop_session(session_id, stop)
+
+    def close_launched_requests(self):
+        """A request still marked `launching` whose session is alive: the previous loop died between
+        the registration of the session and the decision of the request. It is decided now."""
+        for path in libstate.entry_files(self.paths.requests):
+            request = libstate.read_json(path) or {}
+            session_id = (request.get("launching") or {}).get("session")
+            entry = self.sessions().get(session_id)
+            if entry is not None and entry["status"] == "alive" and entry.get("request") == request.get("id"):
+                self.finish(path, request, "spawned", session=session_id)
 
     def reject_stale_switches(self):
         """A switch request deposited while the loop was down would turn a position on at restart:
@@ -1007,10 +1441,12 @@ class Loop:
         self.save_switches()
         self.received_logged = self.logged_receipts()
         self.adopt()
+        self.close_launched_requests()
         self.reject_stale_switches()
     # </editor-fold>
 
     def cycle(self):
+        self.apply_outcomes()
         self.reload_grants()
         self.reap()
         self.account()
@@ -1030,6 +1466,7 @@ class Loop:
         while not self.stopping:
             self.cycle()
             time.sleep(self.cycle_s)
+        self.shut_down()
         self.log("stop", reason=self.stopping.lower(), detail="the sessions stay as they are")
         return 0
 

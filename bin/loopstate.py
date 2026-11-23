@@ -242,6 +242,45 @@ def ancestors():
     return chain
 
 
+def command_line(pid):
+    try:
+        return [part.decode(errors="replace") for part in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")]
+    except OSError:
+        return []
+
+
+def processes():
+    """The pids of /proc, this process excluded."""
+    return [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit() and int(entry.name) != os.getpid()]
+
+
+def processes_with_arguments(words):
+    """The pids of the live processes whose command line carries all the words among its arguments."""
+    found = []
+    for pid in processes():
+        arguments = command_line(pid)[1:]
+        if arguments and all(word in arguments for word in words):
+            found.append(pid)
+    return found
+
+
+def session_leader_with(variable, value):
+    """(pid, starttime) of the live process that leads its own process session and whose environment
+    carries variable=value; None if there is none. The children of that process inherit the
+    environment, and do not lead the session."""
+    wanted = f"{variable}={value}".encode()
+    for pid in processes():
+        try:
+            fields = stat_fields(pid)
+            if fields[0] == "Z" or int(fields[3]) != pid:
+                continue
+            if wanted in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                return pid, int(fields[19])
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def registry(paths):
     return read_json(paths.sessions, {"sessions": {}})
 
