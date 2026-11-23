@@ -170,7 +170,10 @@ def deposit_message(paths, position, sender, text, to_session=None, **fields):
 
 def take_message(paths, position, session_id):
     """The oldest message of the position addressed to the session, moved to received/ with the
-    time it was read; None if there is none."""
+    time it was read, `received`; None if there is none. The time is the reader's: the loop
+    notices the read only at its next cycle, and carries this time in the `read_ts` of its
+    `received` row. The rename claims the message, the rewrite adds the time: in between the file
+    in received/ has no `received`, and the loop waits for it."""
     received = paths.received(position)
     received.mkdir(parents=True, exist_ok=True)
     for path in entry_files(paths.mailbox(position)):

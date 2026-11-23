@@ -110,6 +110,39 @@ print(sum(1 for row in rows if all(str(row.get(key)) == value for key, value in 
 PY
 }
 
+log_check() { # <check> [session]: a check on the times of the loop log, written below in Python
+  python3 - "$STATE/registry/loop.jsonl" "$@" <<'PY'
+import json, sys
+from datetime import datetime
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+check, arguments = sys.argv[2], sys.argv[3:]
+at = lambda text: datetime.fromisoformat(text)
+if check == "consistent":
+    # ts is the time the loop writes the row: it never goes back. read_ts is the time of the read,
+    # on every received row, and never later than the row that reports it.
+    times = [at(row["ts"]) for row in rows]
+    assert times == sorted(times), "ts goes back"
+    for row in rows:
+        if row["event"] == "received":
+            assert row.get("read_ts") and at(row["read_ts"]) <= at(row["ts"]), row
+elif check in ("after-close", "before-close"):
+    closed = [index for index, row in enumerate(rows) if row["event"] == "closed" and row["session"] == arguments[0]]
+    received = [index for index, row in enumerate(rows) if row["event"] == "received" and row["session"] == arguments[0]]
+    assert len(closed) == 1 and received, (closed, received)
+    if check == "after-close":
+        assert received[-1] > closed[0], "the received row precedes the closed row"
+    else:
+        assert at(rows[received[-1]]["read_ts"]) < at(rows[closed[0]]["ts"]), rows[received[-1]]
+elif check == "before-start":
+    start = [row for row in rows if row["event"] == "start"][-1]
+    [received] = [row for row in rows if row["event"] == "received" and row["reason"] == "before-start"]
+    assert at(received["read_ts"]) < at(start["ts"]), (received, start)
+PY
+}
+log_times_consistent() { log_check consistent; }
+read_logged_after_close() { log_check after-close "$1"; }
+read_before_close() { log_check before-close "$1"; }
+
 rows_are() { # <count> <key=value>...
   local expected=$1; shift
   [[ $(rows "$@") -eq $expected ]]
@@ -318,13 +351,27 @@ new_state budget script
 start_loop
 "$LOOP" switch lead on > /dev/null
 "$LOOP" spawn lead "spend 600" > /dev/null
-"$LOOP" spawn lead "spend 600" > /dev/null
+"$LOOP" spawn lead > /dev/null
+verify "lead-1 spends 600" wait_for 5 grep -qx 600 "$STATE/loop/work/lead-1/tokens.txt"
+verify "… lead-2 alive, waiting in its mailbox" wait_for 5 session_alive lead-2
+# The loop paused between two cycles: lead-2 reads its message and spends while the loop does not
+# look. At the next cycle the halt closes lead-2 before the loop notices the read, so the received
+# row of lead-2 comes after its closed row, and only read_ts says that the read came first.
+kill -STOP "$LOOP_PID"
+message_for lead lead-2 "spend 600"
+verify "with the loop paused, lead-2 reads its message and spends 600" \
+  wait_for 5 grep -qx 600 "$STATE/loop/work/lead-2/tokens.txt"
+kill -CONT "$LOOP_PID"
 verify "1200 tokens over a budget of 1000 → halt row, reason budget" \
   wait_for 10 rows_are 1 event=halt position=lead reason=budget
 verify "… the switch of lead is off" switch_is lead False
 verify "… both sessions closed at once, reason halt-budget" \
   wait_for 3 rows_are 2 event=closed position=lead reason=halt-budget
 verify "… and their processes are gone" bash -c "! kill -0 $(session_field lead-1 pid) 2>/dev/null && ! kill -0 $(session_field lead-2 pid) 2>/dev/null"
+verify "the read of lead-2 gets its received row after the closed row of lead-2" \
+  wait_for 3 read_logged_after_close lead-2
+verify "… with read_ts earlier than the ts of the closed row" read_before_close lead-2
+verify "every received row carries read_ts, not later than its ts; ts in write order" log_times_consistent
 "$LOOP" switch lead on > /dev/null
 verify "switched on again with the same budget → halted again" rows_are 2 event=halt position=lead reason=budget
 verify "… the switch stays off" switch_is lead False
@@ -375,6 +422,7 @@ verify "… the switch request deposited while it was down → rejected, stale" 
 verify "… every switch off" bash -c "! grep -q '\"on\": true' '$STATE/loop/switches.json'"
 verify "… the read made while it was down gets its row, reason before-start" \
   rows_are 1 event=received session=root-1 reason=before-start
+verify "… its read_ts earlier than the start row of the new loop" log_check before-start
 verify "… once, and the reads logged before the crash are not repeated" \
   python3 -c "import json, sys, collections; c = collections.Counter(json.loads(l)['detail'] for l in open(sys.argv[1]) if json.loads(l)['event'] == 'received'); assert max(c.values()) == 1, c" \
   "$STATE/registry/loop.jsonl"
@@ -387,6 +435,7 @@ kill -TERM "$LOOP_PID"
 wait "$LOOP_PID" 2>/dev/null
 verify "SIGTERM: the loop exits with a stop row" rows_are 1 event=stop reason=sigterm
 verify "… and the sessions stay alive" bash -c "[[ '$(identity root-1)' == '$ROOT_BEFORE' && '$(identity lead-1)' == '$LEAD_BEFORE' ]]"
+verify "two loops, one log: read_ts on every received row, ts in write order" log_times_consistent
 LOOP_PID=
 kill_state "$STATE"
 

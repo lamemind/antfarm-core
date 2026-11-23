@@ -117,14 +117,21 @@ class Loop:
         self.lock_file = None
 
     # <editor-fold defaultstate="collapsed" desc="Log">
-    def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None):
-        """One row of registry/loop.jsonl, and the same row in clear on the terminal."""
+    def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None,
+            read_ts=None):
+        """One row of registry/loop.jsonl, and the same row in clear on the terminal. `ts` is the time
+        the loop writes the row, so the file stays in write order; a `received` row also carries
+        `read_ts`, the time the session read the message, which can be earlier than rows written
+        before it — the `closed` row of the same session included."""
         row = {"ts": libstate.now(), "event": event, "position": position, "session": session,
                "request": request, "from": sender, "reason": reason, "detail": detail}
+        if read_ts is not None:
+            row["read_ts"] = read_ts
         self.paths.log.parent.mkdir(parents=True, exist_ok=True)
         with open(self.paths.log, "a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(row, ensure_ascii=False) + "\n")
-        words = [row["ts"][11:23], f"{event:<17}", position or "-", session or "", reason or "", detail or ""]
+        words = [row["ts"][11:23], f"{event:<17}", position or "-", session or "", reason or "", detail or "",
+                 f"read {read_ts[11:23]}" if read_ts else ""]
         print(" ".join(word for word in words if word), flush=True)
     # </editor-fold>
 
@@ -619,17 +626,22 @@ class Loop:
             self.save_registry()
 
     def note_received(self):
-        """A row for every message that a session has read and that the log does not carry yet. A
-        read made while the loop was down gets its row at the first cycle after the restart, with
-        reason `before-start` and the time of the read in the message file."""
+        """A row for every message that a session has read and that the log does not carry yet, with
+        `read_ts`: the time of the read, which the reader writes in the message file
+        (loopstate.take_message). The row comes at the cycle after the read, and so it can follow
+        the `closed` row of a session that read and then ended. A read made while the loop was down
+        gets its row at the first cycle after the restart, with reason `before-start`. A file that
+        does not carry the time yet is one the reader has moved and not yet rewritten: it waits
+        for the next cycle."""
         for path in sorted(self.paths.mailboxes.glob("*/received/[0-9]*.json")):
             message = libstate.read_json(path)
-            if message is None or message.get("id") in self.received_logged:
+            if message is None or message.get("id") in self.received_logged or not message.get("received"):
                 continue
             self.received_logged.add(message["id"])
-            before_start = (message.get("received") or "") < self.started
+            before_start = message["received"] < self.started
             self.log("received", position=message.get("position"), session=message.get("to_session"),
-                     sender=message.get("from"), reason="before-start" if before_start else None, detail=message["id"])
+                     sender=message.get("from"), reason="before-start" if before_start else None, detail=message["id"],
+                     read_ts=message["received"])
 
     def logged_receipts(self):
         """The ids of the messages whose read the log already carries: the log is the record."""

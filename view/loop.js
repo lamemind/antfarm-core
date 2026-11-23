@@ -293,7 +293,7 @@ function renderRequests(state) {
 function logItem(row) {
   view.logCounter += 1;
   const words = [row.event, row.position, row.session, row.from && row.from !== row.session ? `from ${row.from}` : null,
-    row.reason, row.detail].filter(Boolean);
+    row.reason, row.read_ts ? `read ${row.read_ts.slice(11, 23)}` : null, row.detail].filter(Boolean);
   const item = element("li", { "data-log-row": String(view.logCounter), "data-event": row.event });
   item.append(element("span", { class: "time" }, clock(row.ts)), document.createTextNode(words.join(" · ")));
   item.record = row;
