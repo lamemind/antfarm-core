@@ -30,11 +30,11 @@ register, and the report says why.
 
 The editor composes at most 5 news per repo, each text at most 100 characters, without titles: under
 `dontAsk` Claude Code denies a Bash command that the permission rule of the request command covers
-when it is too long — a command of 6,000 characters passes, one of 10,010 is denied — or when a line
-of its quoted text starts with `#` — `#` at the start of the text or inside a line passes (measured on
-Claude Code 2.1.332). A gazette of every news of 4 repos is longer than that, and `## <repo>` titles
-start lines with `#`. The prompts tell editor and reporters to shorten, drop the `#` and send again
-when the command is denied.
+when it is too long, or when a line of its quoted text starts with `#` — `#` at the start of the text
+or inside a line passes (test/probe-denials.py). A gazette of every news of 4 repos is longer than
+the threshold, and `## <repo>` titles start lines with `#`. Both prompts carry the cap of a sent
+text, match.SENT_TEXT_CAP characters, in place of `[[cap]]`, and tell editor and reporters to
+shorten, drop the `#` and send again when the command is denied.
 
 SIGTERM and SIGINT end the wait as a timeout does: the game still copies the state, stops loop and
 sessions, and writes the report, with close reason `interrupted`.
@@ -126,19 +126,22 @@ def spawn_command(reporters):
 
 def grants(reporters, negative):
     """The grants of the match from the templates: the values of `repo`, the cap and the budget of
-    reporter, the list of the repos and the spawn command in the prompt of the editor, and the block
-    of the negative test in the prompt of the reporter."""
+    reporter, the list of the repos and the spawn command in the prompt of the editor, the block
+    of the negative test in the prompt of the reporter, and in both prompts the characters of a sent
+    text, match.SENT_TEXT_CAP."""
     loaded = {path.stem: json.loads(path.read_text(encoding="utf-8")) for path in sorted(TEMPLATES.glob("*.json"))}
     editor, reporter = loaded["editor"], loaded["reporter"]
+    cap = str(libmatch.SENT_TEXT_CAP)
     editor["launch"]["prompt"] = (editor["launch"]["prompt"].replace("[[count]]", str(len(reporters)))
-                                  .replace("[[repos]]", ", ".join(reporters)).replace("[[spawn]]", spawn_command(reporters)))
+                                  .replace("[[repos]]", ", ".join(reporters)).replace("[[spawn]]", spawn_command(reporters))
+                                  .replace("[[cap]]", cap))
     reporter["parameters"]["repo"]["values"] = list(reporters)
     reporter["max_sessions"] = len(reporters)
     reporter["budget_tokens"] = len(reporters) * TOKENS_PER_SESSION
     block = ""
     if negative:
         block = NEGATIVE_BLOCK.replace("[[file]]", negative["file"]).replace("[[other]]", negative["other"])
-    reporter["launch"]["prompt"] = reporter["launch"]["prompt"].replace("[[negative]]", block)
+    reporter["launch"]["prompt"] = reporter["launch"]["prompt"].replace("[[negative]]", block).replace("[[cap]]", cap)
     return loaded
 
 

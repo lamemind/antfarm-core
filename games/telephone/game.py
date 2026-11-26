@@ -28,6 +28,8 @@ Il tuo solo strumento è il bus, un comando Bash:
   {bus} send {successor} "<testo>"
       consegna il testo a {successor}
 
+Scrivi testi di al massimo {cap} caratteri: un invio troppo lungo viene negato. Se un invio viene negato, accorcia il testo e rimandalo.
+
 Cosa fai, in ordine:
 
 1. Esegui `{bus} recv` e aspetta: il messaggio può arrivare dopo alcuni minuti, ed è previsto. Se il comando esce senza un messaggio, richiamalo.
@@ -47,9 +49,11 @@ def word_cap(start_message):
     return math.floor(len(start_message.split()) * REPHRASE_QUOTA)
 
 
-def node_prompt(node, view, bus, rule, cap):
+def node_prompt(node, view, bus, rule, cap, text_cap):
+    """`cap` is the word cap of the rephrase rule; `text_cap` the characters of a send
+    (match.SENT_TEXT_CAP), above which `dontAsk` denies the command."""
     return PROMPT.format(node=node, view=view, bus=bus, successor=SUCCESSOR[node],
-                         rule=RULES[rule].format(cap=cap))
+                         rule=RULES[rule].format(cap=cap), cap=text_cap)
 
 
 def oracle(log_rows, facts, cap=None):

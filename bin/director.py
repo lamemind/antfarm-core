@@ -453,7 +453,7 @@ def telephone(args):
             match.launch_script_node(node, [sys.executable, FORWARD_NODE, successor], task)
         else:
             view = libview.as_text(libview.view(graph, node))
-            prompt = telephone_game.node_prompt(node, view, libmatch.BUS, rule, cap)
+            prompt = telephone_game.node_prompt(node, view, libmatch.BUS, rule, cap, libmatch.SENT_TEXT_CAP)
             data = match.launch_node(node, prompt, task, args.model)
             print(f"{node}: session {data['sessionId']} · pid {data['pid']} · claude attach {data['short_id']}")
     print(f"match {match.id}: nodes launched, start message to A ({len(departure.split())} words)")
@@ -616,7 +616,7 @@ def leavitt(args):
             match.launch_script_node(node, command, task)
         else:
             view = libview.as_text(libview.view(graph, node))
-            prompt = leavitt_game.node_prompt(node, view, libmatch.BUS)
+            prompt = leavitt_game.node_prompt(node, view, libmatch.BUS, libmatch.SENT_TEXT_CAP)
             data = match.launch_node(node, prompt, task, args.model)
             print(f"{node}: session {data['sessionId']} · pid {data['pid']} · claude attach {data['short_id']}")
     print(f"match {match.id}: nodes launched, dealing the cards · common symbol {card_data['answer']}")
@@ -725,7 +725,7 @@ def button(args):
             match.launch_script_node(node, command, tasks[node])
         else:
             view = libview.as_text(libview.view(graph, node))
-            prompt = button_game.node_prompt(node, view, libmatch.BUS)
+            prompt = button_game.node_prompt(node, view, libmatch.BUS, libmatch.SENT_TEXT_CAP)
             data = match.launch_node(node, prompt, tasks[node], args.model)
             print(f"{node}: session {data['sessionId']} · pid {data['pid']} · claude attach {data['short_id']}")
     sha_start = sha256(button_file)
@@ -791,7 +791,7 @@ def launch_corpse_node(match, node, args):
     serves no process, but the one of D is written anyway: check 3 of the oracle reads it."""
     task = f"exquisite corpse: write a line after the last one received, node {node}"
     view = libview.as_text(libview.view(match.graph(), node))
-    prompt = corpse_game.node_prompt(node, view, libmatch.BUS)
+    prompt = corpse_game.node_prompt(node, view, libmatch.BUS, libmatch.SENT_TEXT_CAP)
     if args.dry_run:
         if node == corpse_game.NEW_NODE:
             (match.directory / f"prompt-{node}.txt").write_text(prompt, encoding="utf-8")

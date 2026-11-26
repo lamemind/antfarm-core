@@ -31,7 +31,9 @@ BUS_USAGE = """Il tuo solo strumento è il bus, un comando Bash:
   {bus} send <nodo> "<testo>"
       consegna il testo al nodo; il testo fra virgolette doppie, su una sola riga{write}
 
-Scrivi ogni comando col path intero del bus, un comando per chiamata: un comando che comincia in un altro modo viene negato."""
+Scrivi ogni comando col path intero del bus, un comando per chiamata: un comando che comincia in un altro modo viene negato.
+
+Scrivi testi di al massimo {cap} caratteri: un invio troppo lungo viene negato. Se un invio viene negato, accorcia il testo e rimandalo."""
 
 WRITE_USAGE = """
   {bus} write bottone "<testo>"
@@ -96,11 +98,12 @@ Cosa fai:
 PROMPT = {"A": PROMPT_A, "B": PROMPT_B, "F": PROMPT_F}
 
 
-def node_prompt(node, view, bus):
-    """The launch prompt of a node: its role, its view, the bus usage. Only A receives
-    `bus write`, because only A has the edge toward the source."""
+def node_prompt(node, view, bus, text_cap):
+    """The launch prompt of a node: its role, its view, the bus usage with the cap of a text,
+    `text_cap` characters (match.SENT_TEXT_CAP). Only A receives `bus write`, because only A has
+    the edge toward the source."""
     write = WRITE_USAGE.format(bus=bus) if node == "A" else ""
-    usage = BUS_USAGE.format(bus=bus, write=write)
+    usage = BUS_USAGE.format(bus=bus, write=write, cap=text_cap)
     return PROMPT[node].format(view=view, usage=usage, bus=bus, keep_listening=KEEP_LISTENING.format(bus=bus))
 
 

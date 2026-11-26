@@ -591,7 +591,7 @@ from games.corpse import game
 
 effective = "2026-11-08T10:00:10.000+01:00"
 view_d = libview.as_text(libview.view(libgraph.load(v2), "D"))
-prompt_d = game.node_prompt("D", view_d, "/bus")
+prompt_d = game.node_prompt("D", view_d, "/bus", 8000)
 
 
 def row(from_node, to_node, ts, version, text="turno 1: una riga", outcome="delivered", identity="m-1"):
@@ -622,7 +622,8 @@ print(json.dumps({
     "received_after": [entry["id"] for entry in received],
     "turn": [game.declared_turn("turno 7: x"), game.declared_turn("  Turno 12 : y"), game.declared_turn("riga senza numero")],
     "prompt_single_line": "una riga sola" in prompt_d and "Non riportare mai le righe precedenti" in prompt_d and "`turno 17: <la tua riga>`" in prompt_d,
-    "prompt_joining": "Entri a partita già cominciata" in prompt_d and "Entri a partita già cominciata" not in game.node_prompt("A", "v", "/bus"),
+    "prompt_joining": "Entri a partita già cominciata" in prompt_d and "Entri a partita già cominciata" not in game.node_prompt("A", "v", "/bus", 8000),
+    "prompt_text_cap": "Scrivi testi di al massimo 8000 caratteri" in prompt_d and "accorcia il testo e rimandalo" in prompt_d,
     "delta_nodes": [node["id"] for node in delta["nodes_added"]], "delta_removed": [(edge["from"], edge["to"]) for edge in delta["edges_removed"]],
     "delta_added": sorted((edge["from"], edge["to"]) for edge in delta["edges_added"]), "nodes_removed": delta["nodes_removed"],
 }, ensure_ascii=False))
@@ -642,6 +643,7 @@ verify "received after the change: only the v1 message received after effective"
 verify "the turn number is read from the text, None if missing" jq -e '.turn == [7, 12, null]' <<< "$CORPSE"
 verify "the prompt carries the single-line rule and the final turn" jq -e '.prompt_single_line' <<< "$CORPSE"
 verify "only D receives the joining text for an open match" jq -e '.prompt_joining' <<< "$CORPSE"
+verify "the prompt carries the cap of a text and the instruction to shorten and send again" jq -e '.prompt_text_cap' <<< "$CORPSE"
 verify "delta v1 → v2: D joins, C → A goes away, C → D, D → A, D → director appear" \
   jq -e '.delta_nodes == ["D"] and .delta_removed == [["C","A"]] and .delta_added == [["C","D"],["D","A"],["D","director"]] and .nodes_removed == []' <<< "$CORPSE"
 

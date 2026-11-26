@@ -40,6 +40,8 @@ Il tuo solo strumento è il bus, un comando Bash:
   {bus} send <nodo> "<testo>"
       consegna il testo al nodo; il testo fra virgolette doppie, su una sola riga. Per scrivere a più nodi puoi concatenare gli invii in un solo comando con &&
 
+Scrivi testi di al massimo {cap} caratteri: un invio troppo lungo viene negato. Se un invio viene negato, accorcia il testo e rimandalo.
+
 Cosa fai:
 
 1. Esegui `{bus} recv`: il primo messaggio è la tua carta, da director. Può arrivare dopo un minuto, ed è previsto. Se il comando esce senza un messaggio, richiamalo.
@@ -53,8 +55,10 @@ def graph(topology):
     return DIRECTORY / f"graph-{topology}.json"
 
 
-def node_prompt(node, view, bus):
-    return PROMPT.format(node=node, view=view, bus=bus, example=libcards.EXAMPLE)
+def node_prompt(node, view, bus, text_cap):
+    """`text_cap` is the characters of a send (match.SENT_TEXT_CAP), above which `dontAsk` denies
+    the command."""
+    return PROMPT.format(node=node, view=view, bus=bus, example=libcards.EXAMPLE, cap=text_cap)
 
 
 def classify(text, card_data):

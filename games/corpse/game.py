@@ -57,6 +57,8 @@ Il tuo solo strumento è il bus, un comando Bash:
 
 Scrivi ogni comando col path intero del bus. Puoi unire l'invio e l'attesa del messaggio dopo in un solo comando: `{bus} send <nodo> "<testo>" && {bus} recv`.
 
+Scrivi testi di al massimo {cap} caratteri: un invio troppo lungo viene negato. Se un invio viene negato, accorcia il testo e rimandalo.
+
 Le regole:
 
 1. Ogni turno arriva come messaggio nella forma `turno N: <riga>`.
@@ -70,10 +72,12 @@ Comincia eseguendo `{bus} recv`: il primo messaggio può arrivare dopo alcuni mi
 """
 
 
-def node_prompt(node, view, bus):
-    """The launch prompt: the single-line rule, the bus usage, the view at the current version."""
+def node_prompt(node, view, bus, text_cap):
+    """The launch prompt: the single-line rule, the bus usage with the cap of a text, `text_cap`
+    characters (match.SENT_TEXT_CAP), the view at the current version."""
     joining = JOINING_OPEN_MATCH if node == NEW_NODE else ""
-    return PROMPT.format(node=node, joining=joining, view=view, bus=bus, last=LAST_TURN, after_last=LAST_TURN + 1)
+    return PROMPT.format(node=node, joining=joining, view=view, bus=bus, last=LAST_TURN, after_last=LAST_TURN + 1,
+                         cap=text_cap)
 
 
 def between_nodes(log_rows):
