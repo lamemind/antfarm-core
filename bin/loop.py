@@ -113,7 +113,6 @@ import observe as libobserve  # noqa: E402
 CODE_ROOT = libgraph.code_root()
 STATE_ROOT = libmatch.STATE_ROOT
 REQUEST = CODE_ROOT / "bin" / "request"
-VALIDATOR = CODE_ROOT / "bin" / "validate-grants.py"
 HUMAN = libstate.HUMAN
 CYCLE_S = 1.0
 CONCURRENCY = 4
@@ -540,23 +539,10 @@ class Loop:
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Grants">
-    def validated_grants(self):
-        """(grants by position, None) if validate-grants.py accepts the directory, else (None, reason)."""
-        try:
-            outcome = subprocess.run([str(VALIDATOR), str(self.paths.grants)], capture_output=True, text=True, timeout=120)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return None, f"validate-grants.py does not run: {error}"
-        if outcome.returncode != 0:
-            return None, outcome.stderr.strip() or f"validate-grants.py exits {outcome.returncode}"
-        contents = libgrants.read_directory(self.paths.grants)
-        if any(grant is None for grant in contents.values()):
-            return None, "a grant file changed while it was being validated"
-        return libgrants.by_position(contents), None
-
     def load_grants_at_start(self):
         """At start there is no last valid set: invalid grants stop the loop with exit 2."""
         self.fingerprint = libgrants.fingerprint(self.paths.grants)
-        grants, reason = self.validated_grants()
+        grants, reason = libgrants.validated_grants(self.paths.grants)
         if grants is None:
             self.log("grants-rejected", reason="invalid-at-start", detail=reason)
             print(f"invalid grants in {self.paths.grants}: the loop does not start\n{reason}", file=sys.stderr)
@@ -571,7 +557,7 @@ class Loop:
         fingerprint = libgrants.fingerprint(self.paths.grants)
         if fingerprint in (self.fingerprint, self.rejected_fingerprint):
             return
-        grants, reason = self.validated_grants()
+        grants, reason = libgrants.validated_grants(self.paths.grants)
         if grants is not None:
             occupied = sorted(position for position in self.grants
                               if position not in grants and self.live_sessions(position))

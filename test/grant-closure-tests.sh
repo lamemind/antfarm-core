@@ -6,9 +6,9 @@
 #
 # The main fixture is test/grants/closure: an llm chain of depth 2, root → middle → leaf, where root
 # has a rule with a setup placeholder ([[file]]), middle has no allowed_tools and so the default rule
-# of the loop, leaf has the parameter repo with three values; beside leaf, under middle, the script
-# position tally. The variants — a permission mode other than dontAsk, a prefix rule — are copies of
-# it in a temporary folder. The command only reads the grants: the tests run on the files of the
+# of the loop, and Read and Write among its tools, leaf has the parameter repo with three values;
+# beside leaf, under middle, the script position tally. The variants — a permission mode other than
+# dontAsk, a prefix rule, the default set of tools — are copies of it in a temporary folder. The command only reads the grants: the tests run on the files of the
 # engine. Exits 1 if a test fails.
 set -uo pipefail
 
@@ -129,7 +129,19 @@ verify "the text output writes them as not expanded, in the closure of root alon
 verify "… and the value beside the expanded rule, in the closures of root, middle and leaf" \
   prints 3 "repo=gamma · not expanded {state}" "$CHAIN"
 verify "middle, without allowed_tools, has the default rule of the loop, marked default" \
-  holds "$JSON" "own('middle') == ['Bash({request} *)'] and p['middle']['rules'][0]['default'] and not p['leaf']['rules'][0]['default']"
+  holds "$JSON" "own('middle')[0] == 'Bash({request} *)' and p['middle']['rules'][0]['default'] and not p['leaf']['rules'][0]['default']"
+
+echo "the tools granted without a rule"
+verify "Read, among the tools of middle, enters its closure and the closure of root by its bare name, marked" \
+  holds "$JSON" "[rule['rule'] for rule in p['middle']['rules'] if rule['without_rule']] == ['Read'] and 'Read' in rules('root')"
+verify "… not the closure of leaf, whose tools are Bash only" holds "$JSON" "'Read' not in rules('leaf') and not any(rule['without_rule'] for rule in p['leaf']['rules'])"
+verify "Write, which asks a permission and has no rule, enters no closure" holds "$JSON" "not any('Write' in rules(x) for x in p)"
+verify "the text output marks it, in the closures of root and middle" prints 2 "Read                                      granted without a rule" "$CHAIN"
+verify "the gate sees it: Read* → exit 1, it names root and middle" forbids "$CHAIN" 'Read*' 'root, middle'
+DEFAULT_SET=$(variant default-set "g['leaf']['launch']['tools'] = ['default']")
+"$CLOSURE" "$DEFAULT_SET" --json > "$TMP/default-set.json"
+verify "tools [\"default\"], the default set of Claude Code: Read, Grep, Glob, Agent, Skill granted without a rule" \
+  holds "$TMP/default-set.json" "{'Read', 'Grep', 'Glob', 'Agent', 'Skill'} <= {rule['rule'] for rule in p['leaf']['rules'] if rule['without_rule']} and 'Write' not in own('leaf')"
 
 echo "the script position"
 verify "tally has no rules and is marked not analyzable, with its command" \

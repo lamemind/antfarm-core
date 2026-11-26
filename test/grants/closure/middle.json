@@ -1,11 +1,12 @@
 {
   "position": "middle",
-  "description": "Intermedia della catena: senza allowed_tools, ha la regola di default del loop, come il redattore della gazzetta.",
+  "description": "Intermedia della catena: senza allowed_tools, ha la regola di default del loop, come il redattore della gazzetta; fra i tools Read, che in dontAsk gira senza regola, e Write, che senza regola è negato.",
   "parent": "root",
   "max_sessions": 1,
   "budget_tokens": 1000,
   "launch": {
     "type": "llm",
-    "prompt": "Intermedia della catena dei collaudi di bin/grant-closure.py: nessuna sessione la lancia."
+    "prompt": "Intermedia della catena dei collaudi di bin/grant-closure.py: nessuna sessione la lancia.",
+    "tools": ["Bash", "Read", "Write"]
   }
 }

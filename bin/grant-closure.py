@@ -11,6 +11,10 @@ whoever configures the project and never by the loop, and the permission rules o
 child does inside its rules, not which rules it has. So what a position can reach is the union of
 the rules of its subtree, a visit of the tree, with no session to observe.
 
+Under dontAsk a session also uses without a rule the built-in tools of its `tools` field that ask
+no permission (WITHOUT_RULE): each enters the closure as a rule with its bare name, `Read`, the text
+of an allow rule for the whole tool, marked as granted without a rule.
+
 For every position, in the order of the tree, the command prints its closure: every rule of the
 position and of its descendants, each with the position it comes from. A rule that names a parameter
 of its grant becomes one rule per value of the parameter, marked with the value. The placeholders of
@@ -29,8 +33,9 @@ expansion of the parameters, not the permission semantics of Claude Code: the pr
 `Bash(git *)` does not match the glob `Bash(git push*)`. A position not analyzable does not fail the
 gate: the report names it, because the gate does not see inside it.
 
-The grants are read as the loop reads them: bin/validate-grants.py on the directory, then
-bin/grants.py; the rules are the ones bin/grants.py resolves for a launch, defaults included.
+The grants are read as the loop reads them, with the same function, validated_grants of
+bin/grants.py: bin/validate-grants.py on the directory, then the files; the rules are the ones
+bin/grants.py resolves for a launch, defaults included.
 Standard library only, like the loop.
 
 Exits 0; 1 when a --forbid glob matches a rule of a closure; 2 on wrong usage, or when
@@ -42,38 +47,34 @@ import fnmatch
 import itertools
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grants as libgrants  # noqa: E402
 
-VALIDATOR = Path(__file__).resolve().parent / "validate-grants.py"
 # A placeholder of the loop keeps its own name when the rules are resolved: the closure holds for
 # every session and every state root.
 UNRESOLVED = {name: "{" + name + "}" for name in libgrants.PLACEHOLDERS}
 NOT_EXPANDED = re.compile(r"\{(?:" + "|".join(libgrants.PLACEHOLDERS) + r")\}|\[\[[^\[\]]+\]\]")
 # The only permission mode where a command outside the rules is denied without asking.
 BOUNDING_MODE = "dontAsk"
-
-
-class InvalidGrants(Exception):
-    pass
-
-
-def read_grants(directory):
-    """position → grant, read as the loop reads them; InvalidGrants with the reason of the validator."""
-    try:
-        outcome = subprocess.run([str(VALIDATOR), str(directory)], capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise InvalidGrants(f"validate-grants.py does not run: {error}") from error
-    if outcome.returncode != 0:
-        raise InvalidGrants(outcome.stderr.strip() or f"validate-grants.py exits {outcome.returncode}")
-    contents = libgrants.read_directory(directory)
-    if any(grant is None for grant in contents.values()):
-        raise InvalidGrants("a grant file changed while it was being validated")
-    return libgrants.by_position(contents)
+# The built-in tools that run without a permission rule under dontAsk: the ones the tools reference
+# of Claude Code (code.claude.com/docs/en/tools-reference, Claude Code 2.1.332) marks as asking no
+# permission, and the two that ask it only in some cases, EnterWorktree and Skill. The file-access
+# ones, Read, Grep and Glob, still ask outside the working directories, and dontAsk denies there.
+WITHOUT_RULE = frozenset({
+    "Agent", "AskUserQuestion", "CronCreate", "CronDelete", "CronList", "EndConversation", "EnterPlanMode",
+    "EnterWorktree", "Glob", "Grep", "ListAgents", "ListMcpResourcesTool", "ListPlugins", "ListSkills", "LSP",
+    "propose_skills", "PushNotification", "Read", "ReadMcpResourceTool", "RemoteTrigger", "REPL",
+    "ReportFindings", "ScheduleWakeup", "SearchPlugins", "SearchSkills", "SendFeedback", "SendMessage",
+    "SendUserFile", "Skill", "SubagentHandback", "SuggestPluginInstall", "SuggestSkills", "TaskCreate",
+    "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch",
+    "WaitForMcpServers",
+})
+# The value of `tools` that gives a session the default set of Claude Code: every tool of WITHOUT_RULE
+# counts as granted.
+DEFAULT_SET = "default"
 
 
 def subtree(grants, position):
@@ -95,8 +96,16 @@ def expanded_rules(position, grant, launch):
             parameters = dict(zip(named, values))
             text = libgrants.substitute(template, parameters)
             rules.append({"position": position, "rule": text, "parameters": parameters, "default": default,
-                          "not_expanded": list(dict.fromkeys(NOT_EXPANDED.findall(text)))})
+                          "not_expanded": list(dict.fromkeys(NOT_EXPANDED.findall(text))), "without_rule": False})
     return rules
+
+
+def unruled_tools(position, tools):
+    """The built-in tools of a launch that run without a rule under dontAsk, each as a rule with its
+    bare name, the text of an allow rule for the whole tool."""
+    names = sorted(WITHOUT_RULE) if DEFAULT_SET in tools else [tool for tool in tools if tool in WITHOUT_RULE]
+    return [{"position": position, "rule": name, "parameters": {}, "default": False, "not_expanded": [],
+             "without_rule": True} for name in names]
 
 
 def describe(position, grant):
@@ -109,7 +118,7 @@ def describe(position, grant):
     resolved = libgrants.resolved_launch(grant, UNRESOLVED)
     mode = resolved["permission_mode"]
     return {**entry, "permission_mode": mode, "tools": resolved["tools"], "safe_mode": resolved["safe_mode"],
-            "rules": expanded_rules(position, grant, resolved),
+            "rules": expanded_rules(position, grant, resolved) + unruled_tools(position, resolved["tools"]),
             "not_analyzable": None if mode == BOUNDING_MODE else f"permission_mode {mode}: a command outside the rules can run"}
 
 
@@ -133,6 +142,8 @@ def count(number, noun):
 
 def notes(rule):
     words = [f"{name}={value}" for name, value in rule["parameters"].items()]
+    if rule["without_rule"]:
+        words.append("granted without a rule")
     if rule["default"]:
         words.append("default")
     if rule["not_expanded"]:
@@ -200,10 +211,9 @@ def main():
     arguments = parser.parse_args()
     if not arguments.directory.is_dir():
         parser.error(f"{arguments.directory} is not a directory")
-    try:
-        grants = read_grants(arguments.directory)
-    except InvalidGrants as error:
-        print(error, file=sys.stderr)
+    grants, reason = libgrants.validated_grants(arguments.directory)
+    if grants is None:
+        print(reason, file=sys.stderr)
         return 2
     entries = closures(grants)
     if arguments.forbid:

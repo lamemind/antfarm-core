@@ -8,10 +8,12 @@ them. The switch of a position is not in its grant: it is state of the loop, and
 
 The shape is checked by validate-grants.py against schema/grant.schema.json; the consistency that
 the schema does not express is here, in standard library, because validate-grants.py and the loop
-share it. Standard library only, because the loop imports it.
+share it. The loop and bin/grant-closure.py read a directory of grants through validated_grants,
+the same reading for both. Standard library only, because the loop imports it.
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 HUMAN = "human"
@@ -19,6 +21,7 @@ DIRECTORY = "grants"
 DEFAULT_TOOLS = ("Bash",)
 DEFAULT_PERMISSION_MODE = "dontAsk"
 PLACEHOLDERS = ("request", "code", "state", "session", "position")
+VALIDATOR = Path(__file__).resolve().parent / "validate-grants.py"
 
 
 def grant_files(directory):
@@ -90,6 +93,23 @@ def consistency_errors(contents):
 def by_position(contents):
     """position → grant, from file name → content."""
     return {grant["position"]: grant for grant in contents.values()}
+
+
+def validated_grants(directory):
+    """(position → grant, None) if validate-grants.py accepts the directory, else (None, the reason it
+    prints). The validator runs in a process of its own, because it needs jsonschema and whoever
+    imports this module is standard library only; then the files are read here, and a file that
+    changed between the two reads makes the set invalid."""
+    try:
+        outcome = subprocess.run([str(VALIDATOR), str(directory)], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"validate-grants.py does not run: {error}"
+    if outcome.returncode != 0:
+        return None, outcome.stderr.strip() or f"validate-grants.py exits {outcome.returncode}"
+    contents = read_directory(directory)
+    if any(grant is None for grant in contents.values()):
+        return None, "a grant file changed while it was being validated"
+    return by_position(contents), None
 
 
 def root(grants):
