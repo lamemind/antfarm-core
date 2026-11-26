@@ -1,0 +1,2 @@
+{"position": "b", "parent": "a", "max_sessions": 1, "budget_tokens": 1000, "parameters": {"state": {"values": ["x"]}},
+ "launch": {"type": "script", "command": ["{code}/test/loop-node.py"]}}

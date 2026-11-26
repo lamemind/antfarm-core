@@ -1,8 +1,9 @@
 """Grants of the loop, version 0: the org chart that the loop reads, one JSON file per position.
 
 A grant says where a position sits — its parent, `human` for the root —, how many sessions it can
-have alive together, how many tokens its sessions can spend, and how the loop launches a session on
-it. Whoever configures the project writes the grants under `<state>/grants/`; the loop only reads
+have alive together, how many tokens its sessions can spend, how the loop launches a session on it,
+and, if it declares any, the parameters that whoever asks a spawn on it must pass, each from a
+closed list of values. Whoever configures the project writes the grants under `<state>/grants/`; the loop only reads
 them. The switch of a position is not in its grant: it is state of the loop, and it starts off.
 
 The shape is checked by validate-grants.py against schema/grant.schema.json; the consistency that
@@ -51,7 +52,9 @@ def fingerprint(directory):
 def consistency_errors(contents):
     """The errors that the schema does not see, on a set of grants already valid in shape:
     file name equal to the position, no position called `human`, exactly one root, every parent
-    among the declared positions, no cycle."""
+    among the declared positions, no cycle, no parameter named as a placeholder of the loop — the
+    loop would not know which value to write —, no parameter on the root, whose first session
+    starts from its switch, which carries none."""
     errors = []
     grants = {}
     for name, grant in contents.items():
@@ -64,6 +67,12 @@ def consistency_errors(contents):
     if len(roots) != 1:
         errors.append(f"exactly one root is needed, a position with parent `{HUMAN}`: found {len(roots)} {sorted(roots)}")
     for position, grant in grants.items():
+        for name in grant.get("parameters") or {}:
+            if name in PLACEHOLDERS:
+                errors.append(f"{position}: the parameter {name} has the name of a placeholder of the loop, "
+                              f"{{{name}}}: the names {', '.join(PLACEHOLDERS)} are taken")
+        if grant["parent"] == HUMAN and grant.get("parameters"):
+            errors.append(f"{position}: the root takes no parameters: its first session starts from its switch")
         if grant["parent"] != HUMAN and grant["parent"] not in grants:
             errors.append(f"{position}: the parent {grant['parent']} is not a declared position")
     for position in grants:
@@ -91,19 +100,45 @@ def children(grants, position):
     return sorted(child for child, grant in grants.items() if grant["parent"] == position)
 
 
+def parameter_errors(grant, parameters, text):
+    """The reason a spawn with these parameters and this text does not fit the grant, as
+    (reason, detail in Italian), or None if it fits. Every declared parameter is required and takes
+    a value of its list; a parameter the grant does not declare is rejected; a position with
+    parameters takes no free text, because the parameters are the whole contract with whoever
+    spawns. The detail goes back to whoever asked, an LLM session too."""
+    declared = grant.get("parameters") or {}
+    if declared and text:
+        return "text-not-allowed", (f"{grant['position']} prende solo parametri ({', '.join(f'{name}=…' for name in declared)}), "
+                                    "non testo libero")
+    unknown = sorted(name for name in parameters if name not in declared)
+    if unknown:
+        allowed = f"i parametri di {grant['position']} sono {', '.join(declared)}" if declared             else f"{grant['position']} non prende parametri"
+        return "unknown-parameter", f"{', '.join(unknown)}: {allowed}"
+    missing = [name for name in declared if name not in parameters]
+    if missing:
+        return "missing-parameter", f"manca {', '.join(f'{name}=…' for name in missing)}: ogni parametro di {grant['position']} è obbligatorio"
+    for name, definition in declared.items():
+        if parameters[name] not in definition["values"]:
+            return "value-not-allowed", f"{name}={parameters[name]}: i valori ammessi sono {', '.join(definition['values'])}"
+    return None
+
+
 def substitute(text, values):
-    """Replaces {request}, {code}, {state}, {session} and {position} in a text; nothing else."""
-    for name in PLACEHOLDERS:
-        text = text.replace("{" + name + "}", str(values[name]))
+    """Replaces {name} in a text for every name of `values`: the placeholders of the loop and the
+    parameters of the spawn. Nothing else: a brace that names neither stays as it is."""
+    for name, value in values.items():
+        text = text.replace("{" + name + "}", str(value))
     return text
 
 
-def resolved_launch(grant, values):
+def resolved_launch(grant, values, parameters=None):
     """The launch template of the grant with the defaults filled in and the placeholders replaced.
-    `values` carries request, code, state, session and position. The defaults are the most closed:
-    safe mode on, Bash only, in Bash only the request command, dontAsk, an empty directory under
-    the state root."""
+    `values` carries request, code, state, session and position; `parameters` the values of the
+    spawn, already checked against the grant. Both are replaced in the prompt, in the command and in
+    the permission rules. The defaults are the most closed: safe mode on, Bash only, in Bash only
+    the request command, dontAsk, an empty directory under the state root."""
     launch = dict(grant["launch"])
+    values = {**values, **(parameters or {})}
     state = Path(values["state"])
     cwd = launch.get("cwd")
     launch["cwd"] = str(state / "loop" / "work" / values["session"]) if cwd is None else str(state / cwd)
@@ -111,6 +146,8 @@ def resolved_launch(grant, values):
         launch["command"] = [substitute(part, values) for part in launch["command"]]
         return launch
     launch["prompt"] = substitute(launch["prompt"], values)
+    if "allowed_tools" in launch:
+        launch["allowed_tools"] = [substitute(rule, values) for rule in launch["allowed_tools"]]
     launch.setdefault("safe_mode", True)
     launch.setdefault("tools", list(DEFAULT_TOOLS))
     launch.setdefault("allowed_tools", [f"Bash({values['request']} *)"])

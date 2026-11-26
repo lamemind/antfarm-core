@@ -1,0 +1,9 @@
+{
+  "position": "reporter",
+  "description": "Figlia di lead col parametro repo da un elenco chiuso e tetto 2: gli spawn coi parametri, i rifiuti, la coda.",
+  "parent": "lead",
+  "max_sessions": 2,
+  "budget_tokens": 1000,
+  "parameters": {"repo": {"description": "Il repo che la sessione legge.", "values": ["alpha", "beta", "gamma"]}},
+  "launch": {"type": "script", "command": ["{code}/test/loop-node.py", "{repo}"]}
+}

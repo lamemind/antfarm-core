@@ -1,0 +1,2 @@
+{"position": "a", "parent": "human", "max_sessions": 1, "budget_tokens": 1000, "parameters": {"repo": {"values": ["x"]}},
+ "launch": {"type": "script", "command": ["{code}/test/loop-node.py"]}}

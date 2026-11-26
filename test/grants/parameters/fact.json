@@ -1,0 +1,8 @@
+{
+  "position": "fact",
+  "description": "Figlia di reporter senza parametri: la sua escalation verso reporter senza sessioni vive resta nella casella.",
+  "parent": "reporter",
+  "max_sessions": 1,
+  "budget_tokens": 1000,
+  "launch": {"type": "script", "command": ["{code}/test/loop-node.py"]}
+}

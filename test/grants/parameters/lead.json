@@ -1,0 +1,8 @@
+{
+  "position": "lead",
+  "description": "Figlia della radice senza parametri: chiede gli spawn su reporter, e accetta il testo libero.",
+  "parent": "root",
+  "max_sessions": 2,
+  "budget_tokens": 1000,
+  "launch": {"type": "script", "command": ["{code}/test/loop-node.py"]}
+}

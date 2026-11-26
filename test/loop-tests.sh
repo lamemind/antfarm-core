@@ -242,8 +242,52 @@ verify "file not JSON → 1" rejects invalid-not-json "not readable as JSON"
 verify "script launch with a prompt → 1" rejects invalid-script-with-prompt "launch/prompt"
 verify "llm launch without a prompt → 1" rejects invalid-llm-without-prompt "'prompt' is a required property"
 verify "max_sessions 0 → 1" rejects invalid-zero-sessions "less than the minimum of 1"
+verify "grants with a parameter valid → 0" "$VALIDATOR" "$GRANTS/parameters"
+verify "a parameter without its list of values → 1" rejects invalid-parameter-without-values "parameters/repo: 'values' is a required property"
+verify "a parameter with an empty list → 1" rejects invalid-parameter-empty-values "parameters/repo/values: [] should be non-empty"
+verify "a parameter named as a placeholder of the loop → 1" rejects invalid-parameter-placeholder-name "has the name of a placeholder of the loop, {state}"
+verify "a value with a space or a * → 1" rejects invalid-parameter-value "'a b' does not match"
+verify "a parameter on the root → 1" rejects invalid-parameters-on-root "the root takes no parameters"
 verify "empty directory → 1" bash -c "mkdir -p '$TMP/empty' && ! '$VALIDATOR' '$TMP/empty'"
 verify "missing directory → 2" bash -c "'$VALIDATOR' '$TMP/missing'; [[ \$? -eq 2 ]]"
+
+# The launch template of a position with a parameter, resolved as the loop resolves it: the value
+# chosen in the prompt, in the command and in the permission rules, next to the placeholders of the
+# loop, which reach the permission rules too.
+substitution_check() { # <check>
+  python3 - "$ENGINE/bin" "$1" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import grants
+check = sys.argv[2]
+values = {"request": "/engine/bin/request", "code": "/engine", "state": "/state", "session": "reporter-1",
+          "position": "reporter"}
+llm = {"position": "reporter", "parent": "lead", "max_sessions": 2, "budget_tokens": 1,
+       "parameters": {"repo": {"values": ["alpha", "beta"]}},
+       "launch": {"type": "llm", "prompt": "Sei {session}: leggi {repo} con `git -C {state}/repos/{repo} log -20`.",
+                  "allowed_tools": ["Bash({request} *)", "Bash(git -C {state}/repos/{repo} log -20)"]}}
+if check == "llm":
+    launch = grants.resolved_launch(llm, values, {"repo": "beta"})
+    assert launch["prompt"] == "Sei reporter-1: leggi beta con `git -C /state/repos/beta log -20`.", launch["prompt"]
+    assert launch["allowed_tools"] == ["Bash(/engine/bin/request *)", "Bash(git -C /state/repos/beta log -20)"], launch
+elif check == "script":
+    script = {**llm, "launch": {"type": "script", "command": ["{code}/test/loop-node.py", "--repo", "{repo}"]}}
+    launch = grants.resolved_launch(script, values, {"repo": "alpha"})
+    assert launch["command"] == ["/engine/test/loop-node.py", "--repo", "alpha"], launch
+elif check == "default-rule":
+    plain = {**llm, "launch": {"type": "llm", "prompt": "Sei {session}."}}
+    launch = grants.resolved_launch(plain, values)
+    assert launch["allowed_tools"] == ["Bash(/engine/bin/request *)"] and launch["prompt"] == "Sei reporter-1.", launch
+elif check == "unknown-brace":
+    plain = {**llm, "launch": {"type": "llm", "prompt": "Il JSON {\"a\": 1} e {altro} restano come sono."}}
+    launch = grants.resolved_launch(plain, values)
+    assert launch["prompt"] == "Il JSON {\"a\": 1} e {altro} restano come sono.", launch
+PY
+}
+verify "a parameter resolved in the prompt and in the permission rules, next to {state} and {request}" substitution_check llm
+verify "a parameter resolved in the command of a script session" substitution_check script
+verify "without allowed_tools the rule is the request command only" substitution_check default-rule
+verify "a brace that names neither a placeholder nor a parameter stays as it is" substitution_check unknown-brace
 
 # The environment of a launch, without claude: what bin/match.py passes to `claude --bg`, and what
 # it reads back from /proc/<pid>/environ of a process born with a variable of its own.

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "antfarm/grant.schema.json",
   "title": "Grant of a position of the loop, version 0",
-  "description": "One file per position, <state>/grants/<position>.json. Whoever configures the project writes it; the loop only reads it. The switch of a position is not here: it is state of the loop. validate-grants.py checks what the schema does not express: the file name equals the position, no position is called `human`, exactly one root, every parent exists, no cycle.",
+  "description": "One file per position, <state>/grants/<position>.json. Whoever configures the project writes it; the loop only reads it. The switch of a position is not here: it is state of the loop. validate-grants.py checks what the schema does not express: the file name equals the position, no position is called `human`, exactly one root, every parent exists, no cycle, no parameter named as a placeholder of the loop, no parameter on the root.",
   "type": "object",
   "additionalProperties": false,
   "required": ["position", "parent", "max_sessions", "budget_tokens", "launch"],
@@ -26,15 +26,36 @@
       "type": "integer",
       "minimum": 0
     },
+    "parameters": {
+      "description": "The parameters that whoever asks a spawn on the position must pass, `name=value`, each from a closed list of values. Every declared parameter is required, and a position with parameters takes no free text in its spawn. In `prompt`, `allowed_tools` and `command` the loop replaces {name} with the value chosen. Absent: the spawn takes no parameter and accepts a free text, as before.",
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/parameter"}
+    },
     "launch": {"$ref": "#/$defs/launch"}
   },
   "$defs": {
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values"],
+      "properties": {
+        "description": {"type": "string"},
+        "values": {
+          "description": "The closed list of the values allowed. A value ends up inside a permission rule, so it takes only letters, digits, dot, underscore and hyphen: a space or a `*` would change the meaning of the rule.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+        }
+      }
+    },
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,31}$"
     },
     "launch": {
-      "description": "How the loop launches a session of the position. An absent field takes the most closed value: safe mode on, Bash only, in Bash only the request command, dontAsk, an empty directory under the state root. In `prompt` and `command` the loop replaces {request}, {code}, {state}, {session} and {position}.",
+      "description": "How the loop launches a session of the position. An absent field takes the most closed value: safe mode on, Bash only, in Bash only the request command, dontAsk, an empty directory under the state root. In `prompt`, `allowed_tools` and `command` the loop replaces {request}, {code}, {state}, {session}, {position} and the parameters of the grant.",
       "type": "object",
       "additionalProperties": false,
       "required": ["type"],
