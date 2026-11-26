@@ -1,0 +1,15 @@
+{
+  "position": "root",
+  "description": "Radice della catena llm dei collaudi della chiusura: una regola sua con un segnaposto di setup, [[file]], che resta non espanso.",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 1000,
+  "launch": {
+    "type": "llm",
+    "prompt": "Radice della catena dei collaudi di bin/grant-closure.py: nessuna sessione la lancia.",
+    "allowed_tools": [
+      "Bash({request} *)",
+      "Bash(cat {state}/notes/[[file]])"
+    ]
+  }
+}

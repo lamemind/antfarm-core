@@ -1,0 +1,21 @@
+{
+  "position": "leaf",
+  "description": "Foglia della catena col parametro repo a tre valori: la regola che lo nomina diventa tre regole, come quella del cronista della gazzetta.",
+  "parent": "middle",
+  "max_sessions": 3,
+  "budget_tokens": 1000,
+  "parameters": {
+    "repo": {
+      "description": "Il repo che la sessione legge.",
+      "values": ["alpha", "beta", "gamma"]
+    }
+  },
+  "launch": {
+    "type": "llm",
+    "prompt": "Foglia della catena dei collaudi di bin/grant-closure.py, repo {repo}: nessuna sessione la lancia.",
+    "allowed_tools": [
+      "Bash({request} *)",
+      "Bash(git -C {state}/repos/{repo} log -20)"
+    ]
+  }
+}

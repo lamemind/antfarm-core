@@ -1,0 +1,8 @@
+{
+  "position": "tally",
+  "description": "Sorella script della foglia: non ha regole, e la chiusura sua, di middle e di root la porta come non analizzabile.",
+  "parent": "middle",
+  "max_sessions": 1,
+  "budget_tokens": 1000,
+  "launch": {"type": "script", "command": ["{code}/test/loop-node.py"]}
+}
