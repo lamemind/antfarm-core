@@ -1,0 +1,13 @@
+{
+  "position": "desk",
+  "description": "La scrivania della gazzetta: uno script in radice che chiede lo spawn del redattore, aspetta la sua gazzetta e la scrive in gazette.md della partita.",
+  "parent": "human",
+  "max_sessions": 1,
+  "budget_tokens": 0,
+  "launch": {
+    "type": "script",
+    "command": [
+      "{code}/games/gazette/desk.py"
+    ]
+  }
+}
