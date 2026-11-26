@@ -5,7 +5,7 @@ chart, wakes them, and executes their requests.
     ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py [run] [--cycle <s>] [--concurrency <n>] [--no-notify]
         the loop process: it runs in a terminal window and prints its log there
     ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py switch <position> on|off
-    ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py spawn <position> [text...]
+    ANTFARM_STATE_DIR=<project> antfarm-core/bin/loop.py spawn <position> [name=value...] [text...]
         a request of the human, as the view sends it: the loop decides it, the command prints the outcome
 
 The loop reads folders of files under the state root (bin/loopstate.py says which) and writes its
@@ -14,6 +14,15 @@ Switching a position on means the loop may start and wake sessions on it; switch
 also starts its first session, because the parent of the root is the human. Every other session
 starts when someone asks a spawn on its position: the human on any declared position, a session
 only on a child position of its own.
+
+A position can declare parameters in its grant, each with a closed list of values. Whoever asks a
+spawn on it passes every one of them as `name=value`, and no free text: the loop rejects a value
+outside the list (`value-not-allowed`), a missing parameter (`missing-parameter`), one the grant does
+not declare (`unknown-parameter`) and a text (`text-not-allowed`), before it looks at switch and cap.
+The values replace {name} in the prompt, the permission rules and the command of the new session, and
+the session carries them in the registry and in its `launching` and `spawn` rows. An escalation
+toward a position with parameters and no live session waits in the mailbox (`held`, reason
+`parameters`): the loop does not choose the values of a session in place of whoever spawns.
 
 A session of type llm is a Claude Code session in the background (`claude --bg`), launched with
 the flags of the launch template of its grant. The loop wakes it when a message waits for it in
@@ -501,14 +510,15 @@ class Loop:
 
     # <editor-fold defaultstate="collapsed" desc="Log">
     def log(self, event, position=None, session=None, request=None, sender=None, reason=None, detail=None,
-            read_ts=None, foreign_variables=None, started_ts=None):
+            read_ts=None, foreign_variables=None, started_ts=None, parameters=None):
         """One row of registry/loop.jsonl, and the same row in clear on the terminal. `ts` is the time
         the loop writes the row, so the file stays in write order; a `received` row also carries
         `read_ts`, the time the session read the message, which can be earlier than rows written
         before it — the `closed` row of the same session included. The row that ends an operation
         carries `started_ts`, the time the operation began: from `started_ts` to `ts` runs the
         operation, plus the wait for the loop to apply its outcome. The `spawn` and `wake` rows of
-        an LLM session also carry `foreign_variables` (match.foreign_variables)."""
+        an LLM session also carry `foreign_variables` (match.foreign_variables). The rows of a spawn with
+        parameters — `queued`, `launching`, `spawn`, `spawn-failed` — carry `parameters`."""
         row = {"ts": libstate.now(), "event": event, "position": position, "session": session,
                "request": request, "from": sender, "reason": reason, "detail": detail}
         if read_ts is not None:
@@ -517,10 +527,13 @@ class Loop:
             row["started_ts"] = started_ts
         if foreign_variables is not None:
             row["foreign_variables"] = foreign_variables
+        if parameters:
+            row["parameters"] = parameters
         self.paths.log.parent.mkdir(parents=True, exist_ok=True)
         with open(self.paths.log, "a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(row, ensure_ascii=False) + "\n")
-        words = [row["ts"][11:23], f"{event:<17}", position or "-", session or "", reason or "", detail or "",
+        words = [row["ts"][11:23], f"{event:<17}", position or "-", session or "",
+                 " ".join(f"{name}={value}" for name, value in (parameters or {}).items()), reason or "", detail or "",
                  f"read {read_ts[11:23]}" if read_ts else "",
                  f"foreign variables {', '.join(foreign_variables)}" if foreign_variables else ""]
         print(" ".join(word for word in words if word), flush=True)
@@ -615,18 +628,21 @@ class Loop:
     # </editor-fold>
 
     # <editor-fold defaultstate="collapsed" desc="Spawn and operations">
-    def reserve(self, position, launched_by, request_id, reason, text=None, waiting=None):
+    def reserve(self, position, launched_by, request_id, reason, text=None, waiting=None, parameters=None):
         """Decides a session on the position and returns (its id, the operation that launches it),
         for the caller to submit. The session enters the registry now, with status `launching`: from
         here it holds a place of the cap, and it can receive a message. A text becomes the first
         message of the session, in the position mailbox, and `waiting` — (path, message) of a
         message already in the mailbox — is addressed to it: both before the launch, so that the
         session finds them at its first `request recv`. The launch id makes the name of an LLM
-        session unique, and finds the session again after a restart (run_recover_launch)."""
+        session unique, and finds the session again after a restart (run_recover_launch). The
+        parameters, already checked against the grant, replace their names in the launch template,
+        and the session carries them."""
+        parameters = dict(parameters or {})
         session_id = self.next_session_id(position)
         values = {"request": REQUEST, "code": CODE_ROOT, "state": self.paths.state,
                   "session": session_id, "position": position}
-        launch = libgrants.resolved_launch(self.grants[position], values)
+        launch = libgrants.resolved_launch(self.grants[position], values, parameters)
         Path(launch["cwd"]).mkdir(parents=True, exist_ok=True)
         records = self.paths.records / session_id
         records.mkdir(parents=True, exist_ok=True)
@@ -641,8 +657,8 @@ class Loop:
         launch_id = libstate.new_id("l")
         entry = {"id": session_id, "position": position, "type": launch["type"], "status": "launching",
                  "launch_id": launch_id, "cwd": launch["cwd"], "decided": decided, "launched_by": launched_by,
-                 "request": request_id, "reason": reason, "first_message": first_message, "wakes": 0,
-                 "operation": {"kind": "launch", "since": decided}}
+                 "request": request_id, "reason": reason, "parameters": parameters, "first_message": first_message,
+                 "wakes": 0, "operation": {"kind": "launch", "since": decided}}
         if launch["type"] == "llm":
             entry["name"] = f"antfarm loop · {position} · {session_id} · {launch_id}"
         else:
@@ -650,7 +666,8 @@ class Loop:
         self.sessions()[session_id] = entry
         self.save_registry()
         self.log("launching", position=position, session=session_id, request=request_id,
-                 sender=launched_by.get("session") or launched_by["kind"], reason=reason, detail=launch["type"])
+                 sender=launched_by.get("session") or launched_by["kind"], reason=reason, detail=launch["type"],
+                 parameters=parameters)
         return session_id, Operation("launch", session_id, launch=launch, records=records, state=self.paths.state,
                                      name=entry.get("name"), launch_id=launch_id)
 
@@ -765,7 +782,8 @@ class Loop:
         if "error" in outcome:
             unassigned = self.unreserve(session_id)
             self.log("spawn-failed", position=entry["position"], session=session_id, request=entry["request"],
-                     sender=sender, reason=entry["reason"], detail=outcome["error"], started_ts=operation.started_ts)
+                     sender=sender, reason=entry["reason"], detail=outcome["error"], started_ts=operation.started_ts,
+                     parameters=entry.get("parameters"))
             if entry["reason"] == "request":
                 self.finish_pending(entry["request"], "failed", reason="launch-failed",
                                     detail="il lancio è fallito: il motivo è nel log del loop")
@@ -780,7 +798,7 @@ class Loop:
         self.make_alive(entry, outcome)
         self.log("spawn", position=entry["position"], session=session_id, request=entry["request"], sender=sender,
                  reason=entry["reason"], detail=f"{entry['type']} pid {entry['pid']}", foreign_variables=foreign,
-                 started_ts=operation.started_ts)
+                 started_ts=operation.started_ts, parameters=entry.get("parameters"))
         if entry["reason"] == "request":
             self.finish_pending(entry["request"], "spawned", session=session_id)
         if operation.stop_reason:
@@ -859,7 +877,8 @@ class Loop:
         marked = {field: value for field, value in request.items() if field not in PENDING_MARKS}
         libstate.write_json(path, {**marked, "queued": {"reason": reason, "detail": detail, "since": libstate.now()}})
         self.log("queued", position=request.get("position"), request=request["id"], sender=request.get("from"),
-                 reason=reason, detail=f"{request.get('kind')}: {detail}")
+                 reason=reason, detail=f"{request.get('kind')}: {detail}",
+                 parameters=request.get("parameters") if isinstance(request.get("parameters"), dict) else None)
 
     def process_requests(self):
         """Decides every pending request, except the ones whose session is being launched: their
@@ -918,9 +937,11 @@ class Loop:
 
     def request_spawn(self, path, request, sender_entry):
         """The human asks a spawn on any declared position, a session only on a child position of
-        its own. A spawn on a position switched off, or with as many live sessions as its cap,
-        waits in the queue: the loop retries it at every cycle. An accepted spawn stays pending with
-        the `launching` mark, and the outcome of the launch decides it."""
+        its own. The parameters and the text must fit the grant of the position
+        (grants.parameter_errors), or the spawn is rejected with the reason. A spawn on a position
+        switched off, or with as many live sessions as its cap, waits in the queue: the loop retries
+        it at every cycle. An accepted spawn stays pending with the `launching` mark, and the outcome
+        of the launch decides it."""
         position = request.get("position")
         if position not in self.grants:
             self.reject(path, request, "undeclared-position", f"{position} non è una posizione dell'organigramma")
@@ -928,6 +949,14 @@ class Loop:
         if sender_entry is not None and position not in libgrants.children(self.grants, sender_entry["position"]):
             self.reject(path, request, "not-a-child",
                         f"{position} non è una posizione figlia di {sender_entry['position']}")
+            return
+        parameters = request.get("parameters") or {}
+        if not isinstance(parameters, dict) or not all(isinstance(value, str) for value in parameters.values()):
+            self.reject(path, request, "unreadable-parameters", "i parametri devono essere coppie nome=valore di testo")
+            return
+        problem = libgrants.parameter_errors(self.grants[position], parameters, str(request.get("text") or "").strip())
+        if problem is not None:
+            self.reject(path, request, *problem)
             return
         if not self.is_on(position):
             self.queue(path, request, "switched-off", f"l'interruttore di {position} è spento")
@@ -937,7 +966,8 @@ class Loop:
             self.queue(path, request, "cap", f"{position} ha già {live} sessioni vive, il tetto è {self.grants[position]['max_sessions']}")
             return
         launched_by = {"kind": "session", "session": request["from"]} if sender_entry else {"kind": HUMAN, "session": None}
-        session_id, operation = self.reserve(position, launched_by, request["id"], "request", text=request.get("text"))
+        session_id, operation = self.reserve(position, launched_by, request["id"], "request", text=request.get("text"),
+                                             parameters=parameters)
         self.mark_launching(path, request, session_id)
         self.submit(operation)
 
@@ -1023,11 +1053,15 @@ class Loop:
         """The rule of delivery: to the session that launched whoever escalates, if it is live;
         else to the first live session of the position — a session being launched counts —; else
         to a new session. On a position switched off the message stays in the mailbox, and so it
-        does when the launch fails."""
+        does when the launch fails, and when a new session would need parameters."""
         if not self.is_on(position):
             self.hold(message, position, "switched-off", f"the switch of {position} is off")
             return False
         live = self.live_sessions(position)
+        if not live and self.grants[position].get("parameters"):
+            self.hold(message, position, "parameters",
+                      f"a session of {position} needs its parameters, and the loop does not choose them for a message")
+            return False
         launcher = message.get("launcher")
         operation = None
         if live:
@@ -1536,7 +1570,8 @@ def main():
     switch_parser.add_argument("state", choices=("on", "off"))
     spawn_parser = subcommands.add_parser("spawn", help="asks a spawn on a position, as the human")
     spawn_parser.add_argument("position")
-    spawn_parser.add_argument("text", nargs="*")
+    spawn_parser.add_argument("words", nargs="*", metavar="name=value... text",
+                              help="the parameters of the position, then the text")
     arguments = sys.argv[1:]
     if not arguments or arguments[0].startswith("-") and arguments[0] not in ("-h", "--help"):
         arguments = ["run", *arguments]
@@ -1545,7 +1580,11 @@ def main():
     if args.command == "switch":
         return human_request(paths, "switch", position=args.position, on=args.state == "on")
     if args.command == "spawn":
-        return human_request(paths, "spawn", position=args.position, text=" ".join(args.text).strip())
+        try:
+            parameters, text = libstate.spawn_arguments(args.words)
+        except ValueError as error:
+            parser.error(str(error))
+        return human_request(paths, "spawn", position=args.position, parameters=parameters, text=text)
     return Loop(paths, args.cycle, notify=not args.no_notify, concurrency=args.concurrency).run()
 
 

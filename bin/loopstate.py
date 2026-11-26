@@ -25,6 +25,7 @@ Standard library only: the request command imports it on every call.
 
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +34,9 @@ from pathlib import Path
 HUMAN = "human"
 REGISTRATION_WAIT_S = 20
 POLLING_STEP_S = 0.25
+# A parameter of a spawn, as `request spawn` and `loop.py spawn` read it: `name=value`, the name an id
+# of the grant schema; the value is everything after the first `=`, checked by the loop.
+PARAMETER = re.compile(r"([A-Za-z][A-Za-z0-9_-]{0,31})=(.*)", re.DOTALL)
 
 
 class Paths:
@@ -100,6 +104,23 @@ def deposit(directory, entry):
 
 
 # <editor-fold defaultstate="collapsed" desc="Requests">
+def spawn_arguments(words):
+    """(parameters, text) from the words after the position of a spawn: the leading words of the
+    form `name=value` are the parameters, the rest joined by spaces is the text. A word `name=value`
+    after the first word of the text is text. Raises ValueError on a parameter given twice."""
+    parameters = {}
+    index = 0
+    while index < len(words):
+        hit = PARAMETER.fullmatch(words[index])
+        if not hit:
+            break
+        if hit.group(1) in parameters:
+            raise ValueError(f"parametro ripetuto: {hit.group(1)}")
+        parameters[hit.group(1)] = hit.group(2)
+        index += 1
+    return parameters, " ".join(words[index:]).strip()
+
+
 def deposit_request(paths, sender, kind, **fields):
     """Deposits a request and returns its id. The sender is never an argument of the request
     command: whoever calls this already knows it, from the process ancestry or because it is the

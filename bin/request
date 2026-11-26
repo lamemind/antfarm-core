@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """The command with which a session of the loop asks the loop something, and reads its mailbox.
 
-    request spawn <position> [text...]   asks a session on a child position of its own; the text,
-                                         if any, becomes the first message of the new session
+    request spawn <position> [name=value...] [text...]
+                                         asks a session on a child position of its own. The leading
+                                         `name=value` words are the parameters the grant of the
+                                         position declares, each from its closed list; the text, if
+                                         any, becomes the first message of the new session, and a
+                                         position with parameters takes none
     request escalate [package] [text...] sends the text to the mailbox of the parent position; from
                                          the root it becomes an interpellation of the human, and
                                          then the package must carry alternatives, recommendation
@@ -51,15 +55,21 @@ def caller():
 
 def command_spawn(args):
     if not args:
-        print("uso: request spawn <posizione> [testo...]", file=sys.stderr)
+        print("uso: request spawn <posizione> [nome=valore...] [testo...]", file=sys.stderr)
+        return 2
+    try:
+        parameters, text = libstate.spawn_arguments(args[1:])
+    except ValueError as error:
+        print(f"uso: request spawn <posizione> [nome=valore...] [testo...] — {error}", file=sys.stderr)
         return 2
     found = caller()
     if found is None:
         return 1
     session_id, _ = found
-    request_id = libstate.deposit_request(PATHS, session_id, "spawn", position=args[0], text=" ".join(args[1:]).strip())
+    request_id = libstate.deposit_request(PATHS, session_id, "spawn", position=args[0], parameters=parameters, text=text)
     state = libstate.wait_for_decision(PATHS, request_id, DECISION_WAIT_S)
-    print(f"richiesta {request_id} · spawn {args[0]}: {libstate.describe_decision(state)}")
+    asked = " ".join([args[0], *(f"{name}={value}" for name, value in parameters.items())])
+    print(f"richiesta {request_id} · spawn {asked}: {libstate.describe_decision(state)}")
     return libstate.exit_code(state)
 
 

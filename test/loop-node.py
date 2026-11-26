@@ -3,8 +3,10 @@
 
 It reads its mailbox with `request recv`, waiting; every line of a message is an instruction:
 
-    spawn <position> [text]      request spawn; in the text `|` stands for a new line, so a spawn
-                                 can carry the instructions of the session it asks for
+    spawn <position> [name=value...] [text]
+                                 request spawn; the leading `name=value` words are its parameters,
+                                 each one argument; in the text `|` stands for a new line, so a
+                                 spawn can carry the instructions of the session it asks for
     escalate <arguments>         request escalate with the arguments split as a shell does, so
                                  that `--alternative 'a b'` stays one argument
     spend <tokens>               adds the tokens to tokens.txt in its working directory: the
@@ -16,6 +18,7 @@ After the instructions of a message it reads the next one; without messages it w
 Every instruction and its outcome go to stdout, which the loop keeps in loop/records/<session>/.
 """
 
+import re
 import shlex
 import subprocess
 import sys
@@ -25,6 +28,7 @@ from pathlib import Path
 REQUEST = Path(__file__).resolve().parent.parent / "bin" / "request"
 TOKENS = Path("tokens.txt")
 RECV_WAIT_S = "60"
+PARAMETER = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}=\S*")
 
 
 def request(*args):
@@ -46,7 +50,12 @@ def run(line):
     word, _, rest = line.strip().partition(" ")
     if word == "spawn":
         position, _, text = rest.partition(" ")
-        request("spawn", position, *([text.replace("|", "\n")] if text else []))
+        words = text.split(" ") if text else []
+        parameters = []
+        while words and PARAMETER.fullmatch(words[0]):
+            parameters.append(words.pop(0))
+        text = " ".join(words)
+        request("spawn", position, *parameters, *([text.replace("|", "\n")] if text else []))
     elif word == "escalate":
         request("escalate", *shlex.split(rest))
     elif word == "spend":
