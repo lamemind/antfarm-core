@@ -571,6 +571,20 @@ verify "two numbers lost between B and C → 8/10" jq -e '.outcome == "8/10"' <<
 verify "the lost numbers are charged to the hop B → C, reformatted digit included" jq -e '.lost_bc == .expected' <<< "$ORACLE"
 verify "chain without C → D: outcome interrupted" jq -e '.interrupted == "interrupted C→D"' <<< "$ORACLE"
 
+echo "the prompt of Leavitt"
+LEAVITT=$(python3 - "$ANTFARM" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from games.leavitt import game
+prompt = game.node_prompt("C", "v", "/bus", 8000)
+print(json.dumps({"chain": "concatenare gli invii in un solo comando con &&" in prompt,
+                  "cap_of_the_command": "Tutti i testi di un comando, insieme, sono di al massimo 8000 caratteri" in prompt,
+                  "send_again": "accorcia il testo e rimandalo" in prompt}))
+PY
+)
+verify "the prompt lets a node chain sends and caps all the texts of a command together" jq -e '.chain and .cap_of_the_command' <<< "$LEAVITT"
+verify "the prompt says to shorten the text and send it again when a send is denied" jq -e '.send_again' <<< "$LEAVITT"
+
 echo "the exquisite corpse: graphs, prompt, oracle"
 V1="$ANTFARM/games/corpse/graph-v1.json"
 V2="$ANTFARM/games/corpse/graph-v2.json"
