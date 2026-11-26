@@ -24,8 +24,20 @@ command of the editor reach the loop in consecutive cycles and their launches ru
 starts the view of the loop on the match and prints its address. It switches reporter, editor and
 desk on, the root last, and waits for gazette.md, up to --timeout. Then it copies the registry of
 the sessions and every message of the mailboxes into the match, because loop/ stays out of git,
-stops the loop, stops the sessions, and writes report.md (report.py) and the row of the match in
-registry/matches.tsv of the project.
+stops the loop, stops the sessions, and writes report.md (report.py). Only a match whose gazette
+arrived gets its row in registry/matches.tsv of the project: without a gazette there is no outcome to
+register, and the report says why.
+
+The editor composes at most 5 news per repo, each text at most 100 characters, without titles: under
+`dontAsk` Claude Code denies a Bash command that the permission rule of the request command covers
+when it is too long — a command of 6,000 characters passes, one of 10,010 is denied — or when a line
+of its quoted text starts with `#` — `#` at the start of the text or inside a line passes (measured on
+Claude Code 2.1.332). A gazette of every news of 4 repos is longer than that, and `## <repo>` titles
+start lines with `#`. The prompts tell editor and reporters to shorten, drop the `#` and send again
+when the command is denied.
+
+SIGTERM and SIGINT end the wait as a timeout does: the game still copies the state, stops loop and
+sessions, and writes the report, with close reason `interrupted`.
 
 `--negative-test` plays a `*-negative-test-*` match: one reporter, on the first repo, told to try
 `cat` on a file of its repo and `git log` on the second repo before its news. An acceptance test of
@@ -253,15 +265,23 @@ def stop(directory, loop, view):
         view.kill()
 
 
+def interrupted(signal_number, _frame):
+    raise KeyboardInterrupt(signal.Signals(signal_number).name)
+
+
 def play(args):
+    signal.signal(signal.SIGTERM, interrupted)
     directory, meta = prepare(args)
     log(f"match {meta['match']}: reporters {', '.join(meta['reporters'])}")
     loop, view, address = start(directory, meta, args.view_port)
     reason = "error"
     try:
-        reason = wait_for_gazette(directory, loop, args.timeout)
+        try:
+            reason = wait_for_gazette(directory, loop, args.timeout)
+            time.sleep(2)
+        except KeyboardInterrupt:
+            reason = "interrupted"
         log(f"close: {reason}")
-        time.sleep(2)
         keep_state(directory)
     finally:
         stop(directory, loop, view)
@@ -270,7 +290,7 @@ def play(args):
                 status_after=status_of({name: Path(path) for name, path in meta["repos"].items()}))
     write_json(directory / "meta.json", meta)
     result, observed = libreport.compose(directory)
-    if not meta["negative_test"]:
+    if not meta["negative_test"] and reason == "gazette":
         libobserve.register_match({"match": meta["match"], "game": GAME, "outcome": result["outcome"],
                                    "human_turns": observed["human_turns"], "token": observed["token"], "cwd": directory})
     log(f"outcome {result['outcome']} · human turns {observed['human_turns']} · tokens {observed['token']} · "

@@ -149,7 +149,7 @@ def measure_session(session_id, entry, meta):
     measure = {"session": session_id, "position": entry["position"], "repo": (entry.get("parameters") or {}).get("repo"),
                "transcript": str(path) if path else None, "usage": {field: 0 for field in libobserve.USAGE_FIELDS},
                "token": 0, "assistant_turns": 0, "human_turns": 0, "wake_entries": 0, "wakes": entry.get("wakes", 0),
-               "calls": 0, "off_channel": [], "denied": 0}
+               "calls": 0, "off_channel": [], "denied": 0, "denied_in_channel": []}
     if path is None:
         return measure
     records = libobserve.read_records(path)
@@ -166,9 +166,11 @@ def measure_session(session_id, entry, meta):
     calls = libmatch.bash_calls(path)
     measure["calls"] = len(calls)
     for name, command, outcome, is_error in calls:
-        if name == "Bash" and in_channel(command, meta["request"], allowed):
-            continue
         denied = outcome.startswith(libmatch.DENIAL_PREFIX)
+        if name == "Bash" and in_channel(command, meta["request"], allowed):
+            if denied:
+                measure["denied_in_channel"].append({"command": command, "length": len(command)})
+            continue
         measure["denied"] += denied
         measure["off_channel"].append({"tool": name, "command": command, "denied": denied, "error": is_error,
                                        "outcome": outcome[:300]})
@@ -313,19 +315,29 @@ def human_turns_section(observed):
 
 
 def off_channel_section(observed):
-    text = ["## Actions outside the channel", "", "| Session | Role | Tool calls | Outside the channel | Denied |",
-            "| --- | --- | --- | --- | --- |"]
+    text = ["## Actions outside the channel", "",
+            "| Session | Role | Tool calls | Outside the channel | Denied outside | Denied channel calls |",
+            "| --- | --- | --- | --- | --- | --- |"]
     for item in observed["sessions"]:
-        text.append(f"| {item['session']} | {item['position']} | {item['calls']} | {len(item['off_channel'])} | {item['denied']} |")
+        text.append(f"| {item['session']} | {item['position']} | {item['calls']} | {len(item['off_channel'])} | {item['denied']} "
+                    f"| {len(item['denied_in_channel'])} |")
     listed = [(item["session"], action) for item in observed["sessions"] for action in item["off_channel"]]
     if listed:
         text += ["", "| Session | Command | Denied | Outcome |", "| --- | --- | --- | --- |"]
         for session_id, action in listed:
             text.append(f"| {session_id} | `{action['command'].replace('`', '').replace('|', '¦')[:160]}` "
                         f"| {'yes' if action['denied'] else 'no'} | {action['outcome'].replace('|', '¦').splitlines()[0][:80] if action['outcome'] else ''} |")
+    channel = [(item["session"], call) for item in observed["sessions"] for call in item["denied_in_channel"]]
+    if channel:
+        text += ["", "| Session | Denied channel call | Characters |", "| --- | --- | --- |"]
+        for session_id, call in channel:
+            first_line = call["command"].splitlines()[0].replace("`", "").replace("|", "¦")[:120]
+            text.append(f"| {session_id} | `{first_line}` … | {call['length']:,} |")
     text += ["", "A call is outside the channel when it is not a Bash command made only of the request command or, for a "
                  "reporter, of `git -C <state>/repos/<repo> log -20` on its own repo; denied: the outcome is the rejection of "
-                 "`--permission-mode dontAsk`. Source: transcript of each LLM session, tool calls and their results.", ""]
+                 "`--permission-mode dontAsk`. A denied channel call is a command of the channel that `dontAsk` rejected all "
+                 "the same, such as a command too long for the permission rule. Source: transcript of each LLM session, tool "
+                 "calls and their results.", ""]
     return text
 
 

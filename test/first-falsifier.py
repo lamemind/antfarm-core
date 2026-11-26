@@ -5,7 +5,10 @@
 
 For every match in the match registry it reads the transcripts of its LLM nodes, found through the
 `sessionId` in nodes.json, and counts the `user` entries after the first one that are not a
-`tool_result`. The first `user` entry is the director's launch message. The transcript format is read
+`tool_result`. The first `user` entry is the director's launch message. A match played on the loop
+has no nodes.json: its LLM sessions are in sessions.json, the registry of the loop copied into the
+match, and a `user` entry equal to the fixed text with which the loop wakes a session (WAKE_TEXT of
+bin/loop.py, read from the source) is a wake, counted apart and not as a foreign entry. The transcript format is read
 here directly, without going through `bin/observe.py`: this measure checks the `human_turns` that the
 engine declares in the registry, so it does not inherit its parser.
 
@@ -17,6 +20,7 @@ Exits 0 if the distinct games are at least 3, 1 otherwise, 2 without ANTFARM_STA
 
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +32,16 @@ REGISTRY = STATE_ROOT / "registry" / "matches.tsv"
 MATCHES = STATE_ROOT / "matches"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 GAMES_THRESHOLD = 3
+LOOP_SOURCE = Path(__file__).resolve().parent.parent / "bin" / "loop.py"
+
+
+def wake_pattern():
+    """WAKE_TEXT of the loop as a pattern, with any path where the request command goes."""
+    text = re.search(r'^WAKE_TEXT = "(.+)"$', LOOP_SOURCE.read_text(encoding="utf-8"), re.MULTILINE).group(1)
+    return re.compile(re.escape(text).replace(re.escape("{request}"), r"\S+"))
+
+
+WAKE = wake_pattern()
 
 
 def user_entries(path):
@@ -40,22 +54,41 @@ def is_tool_result(entry):
     return isinstance(content, list) and bool(content) and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
 
 
+def text_of(entry):
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, list):
+        return "".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text")
+    return content or ""
+
+
+def llm_sessions(directory):
+    """node or session → sessionId of the LLM sessions of the match: from nodes.json for a match of
+    the director, from sessions.json for a match on the loop."""
+    if (directory / "nodes.json").is_file():
+        nodes = json.loads((directory / "nodes.json").read_text(encoding="utf-8"))["nodes"]
+        return {node: entry["sessionId"] for node, entry in nodes.items() if entry.get("type") == "llm"}
+    registry = json.loads((directory / "sessions.json").read_text(encoding="utf-8"))["sessions"]
+    return {session: entry["sessionId"] for session, entry in registry.items() if entry.get("type") == "llm"}
+
+
 def measure_match(row):
     directory = MATCHES / row["match"]
-    nodes = json.loads((directory / "nodes.json").read_text(encoding="utf-8"))["nodes"]
-    sessions = {node: entry["sessionId"] for node, entry in nodes.items() if entry.get("type") == "llm"}
-    foreign_entries, missing, tool_result = 0, [], 0
+    sessions = llm_sessions(directory)
+    foreign_entries, missing, tool_result, wakes = 0, [], 0, 0
     for node, session in sessions.items():
         found = sorted(CLAUDE_PROJECTS.glob(f"*/{session}.jsonl"))
         if not found:
             missing.append(node)
             continue
         after_launch = user_entries(found[0])[1:]
-        foreign_entries += sum(not is_tool_result(entry) for entry in after_launch)
         tool_result += sum(is_tool_result(entry) for entry in after_launch)
+        others = [entry for entry in after_launch if not is_tool_result(entry)]
+        woken = sum(1 for entry in others if WAKE.fullmatch(text_of(entry)))
+        wakes += woken
+        foreign_entries += len(others) - woken
     report = (directory / "report.md").is_file()
     return {"match": row["match"], "game": row["game"], "nodes": len(sessions), "tool_result": tool_result,
-            "foreign_entries": foreign_entries, "missing_transcripts": missing, "report": report,
+            "wakes": wakes, "foreign_entries": foreign_entries, "missing_transcripts": missing, "report": report,
             "counts": report and not missing and foreign_entries == 0 and bool(sessions)}
 
 
@@ -68,6 +101,7 @@ def main():
     else:
         for measure in measures:
             print(f"{measure['match']} · {measure['game']} · nodes {measure['nodes']} · tool_result {measure['tool_result']} · "
+                  f"wakes {measure['wakes']} · "
                   f"foreign entries {measure['foreign_entries']} · missing transcripts {measure['missing_transcripts'] or 0} · "
                   f"report {'yes' if measure['report'] else 'no'} · {'counts' if measure['counts'] else 'does NOT count'}")
         print(f"distinct games with at least one match that counts: {len(games)} ({', '.join(games)}) · threshold {GAMES_THRESHOLD}")

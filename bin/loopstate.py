@@ -34,6 +34,11 @@ from pathlib import Path
 HUMAN = "human"
 REGISTRATION_WAIT_S = 20
 POLLING_STEP_S = 0.25
+# How often a request rereads its file while it waits for the decision of the loop. Short, because a
+# session that asks N spawns in one command, `request spawn … && request spawn …`, deposits each one
+# only when the previous one has its answer: with 0.25 s, four spawns took 0.28 s each, and the fourth
+# launch began after the first had ended.
+DECISION_POLL_S = 0.05
 # A parameter of a spawn, as `request spawn` and `loop.py spawn` read it: `name=value`, the name an id
 # of the grant schema; the value is everything after the first `=`, checked by the loop.
 PARAMETER = re.compile(r"([A-Za-z][A-Za-z0-9_-]{0,31})=(.*)", re.DOTALL)
@@ -150,7 +155,7 @@ def wait_for_decision(paths, request_id, wait_s):
         if state is None or any(state.get(field) for field in ("outcome", "queued", "launching")) \
                 or time.monotonic() >= limit:
             return state
-        time.sleep(POLLING_STEP_S)
+        time.sleep(DECISION_POLL_S)
 
 
 # What a decided request means for whoever deposited it, in Italian: these texts reach the LLM sessions.
