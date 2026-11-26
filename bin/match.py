@@ -76,6 +76,16 @@ EXPECTED_VARIABLES = (
 # `claude --version` before their first launch, and say when the list is to be measured again.
 EXPECTED_VARIABLES_CLAUDE_VERSION = "2.1.332"
 EXPECTED_VARIABLES_PROBE = "antfarm-core/test/probe-environment.py settings"
+# Under dontAsk Claude Code denies a Bash command that its permission rule covers when the command is
+# too long, with the same text as every other denial, and the session does not learn why. The length
+# counts in characters, not in lines: a command of 9,946 characters passes, one of 10,026 is denied, a
+# text of 120 short lines passes (test/probe-denials.py, Claude Code 2.1.332). Every prompt that makes a session send a text — `request escalate` on the loop, `bus
+# send` in the games — caps the text at SENT_TEXT_CAP characters: the longest command seen passing,
+# rounded down to the thousand, minus 1,000 for the path and the verb of the command and for a text that
+# weighs more in bytes than in characters. The probe exits 1 when a command with a text of SENT_TEXT_CAP
+# characters no longer passes.
+SENT_TEXT_CAP = 8000
+SENT_TEXT_CAP_CLAUDE_VERSION = "2.1.332"
 # `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
 # passes --name: a resume does not, and the id is followed by a new line.
 LAUNCH_PATTERN = re.compile(r"backgrounded · ([0-9a-f]{8})\b")
