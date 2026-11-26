@@ -5,7 +5,7 @@ chooses, so that the concurrency of the loop is measured without tokens.
 The test copies this file as `claude` into a directory of its own, puts the directory first on the
 PATH of the loop, and writes config.json next to it:
 
-    {"launch_s": 5, "resume_s": 5, "stop_s": 5, "agents_s": 0, "version": "2.1.330",
+    {"launch_s": 5, "resume_s": 5, "stop_s": 5, "agents_s": 0, "version": "2.1.332",
      "request": "<engine>/bin/request", "tokens": 600, "ignore_stops": 0}
 
 It answers the commands the loop runs, as Claude Code does (antfarm-core/test/probe-resume.py):

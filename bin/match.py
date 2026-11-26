@@ -60,8 +60,9 @@ BASH_TIMEOUT_MS = 900000
 PASSED_VARIABLES = ("HOME", "PATH")
 # The names in the environment of a session process under a service started with PASSED_VARIABLES
 # alone: the two, and the ones Claude Code adds itself, on a process the service kept ready and on one
-# it starts for the launch (test/probe-environment.py, measure c, Claude Code 2.1.330). Any other name
-# comes from whoever started the service.
+# it starts for the launch (test/probe-environment.py, measure c, Claude Code 2.1.330). Measured again
+# on 2.1.332: no name outside the list, on processes the service kept ready. Any other name comes
+# from whoever started the service.
 EXPECTED_VARIABLES = (
     "AI_AGENT", "BROWSER", "CLAUDE_AFK_TIMEOUT_MS", "CLAUDE_BG_BACKEND", "CLAUDE_BG_DISPATCHER_RATE_LIMIT_TIER",
     "CLAUDE_BG_DISPATCHER_SUBSCRIPTION_TYPE", "CLAUDE_BG_RENDEZVOUS_SOCK", "CLAUDE_BG_SESSION_CREDENTIAL",
@@ -73,7 +74,7 @@ EXPECTED_VARIABLES = (
 # The version of Claude Code on which EXPECTED_VARIABLES was measured. A version that adds a name of its
 # own shows that name among the foreign variables of every session: director and loop compare this with
 # `claude --version` before their first launch, and say when the list is to be measured again.
-EXPECTED_VARIABLES_CLAUDE_VERSION = "2.1.330"
+EXPECTED_VARIABLES_CLAUDE_VERSION = "2.1.332"
 EXPECTED_VARIABLES_PROBE = "antfarm-core/test/probe-environment.py settings"
 # `claude --bg` prints `backgrounded · <short id>`, followed by ` · <name>` only when the launch
 # passes --name: a resume does not, and the id is followed by a new line.
