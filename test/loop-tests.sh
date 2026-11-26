@@ -493,6 +493,57 @@ kill_session lead-1
 verify "a session closes → the queued spawn runs" wait_for 10 rows_are 3 event=spawn position=lead
 stop_loop
 
+echo "loop: spawn with parameters"
+new_state parameters parameters
+start_loop
+for position in root lead reporter fact; do "$LOOP" switch "$position" on > /dev/null; done
+verify "switch root on → root-1 alive" wait_for 5 session_alive root-1
+"$LOOP" spawn fact "escalate notizia senza cronista" > /dev/null
+verify "an escalation toward a position with parameters and no live session → held, reason parameters" \
+  wait_for 10 rows_are 1 event=held position=reporter reason=parameters
+verify "… the loop spawns no session on it" rows_are 0 event=launching position=reporter
+verify "a free text on a position without parameters → accepted, as before" \
+  bash -c "'$LOOP' spawn lead 'spawn reporter repo=alpha' | grep -q 'lanciata\|in lancio'"
+verify "lead-1 asks reporter repo=alpha → spawn row of reporter-1 with its parameters" \
+  wait_for 10 rows_are 1 event=spawn session=reporter-1 "parameters={'repo': 'alpha'}"
+verify "… its launching row carries them too" rows_are 1 event=launching session=reporter-1 "parameters={'repo': 'alpha'}"
+verify "… in the registry launched_by is lead-1, who asked" \
+  bash -c "[[ \"\$(python3 -c \"import json; print(json.load(open('$STATE/loop/sessions.json'))['sessions']['reporter-1']['launched_by'])\")\" == \"{'kind': 'session', 'session': 'lead-1'}\" ]]"
+verify "… and parameters repo=alpha" \
+  bash -c "[[ \"\$(python3 -c \"import json; print(json.load(open('$STATE/loop/sessions.json'))['sessions']['reporter-1']['parameters'])\")\" == \"{'repo': 'alpha'}\" ]]"
+verify "… the value replaces {repo} in the command of the session" \
+  bash -c "[[ \"\$(python3 -c \"import json; print(json.load(open('$STATE/loop/sessions.json'))['sessions']['reporter-1']['command'][-1])\")\" == alpha ]]"
+verify "the held escalation goes to reporter-1, alive now" \
+  wait_for 10 rows_are 1 event=deliver position=reporter session=reporter-1 reason=alive-session
+message_for lead lead-1 $'spawn reporter repo=delta\nspawn reporter\nspawn reporter repo=alpha other=1\nspawn reporter repo=alpha testo libero\nspawn root'
+verify "repo=delta, outside the list → rejected, value-not-allowed" \
+  wait_for 10 rows_are 1 event=rejected position=reporter reason=value-not-allowed from=lead-1
+verify "… the detail lists the values allowed" \
+  bash -c "grep '\"value-not-allowed\"' '$STATE/registry/loop.jsonl' | grep -q 'i valori ammessi sono alpha, beta, gamma'"
+verify "no repo → rejected, missing-parameter" wait_for 10 rows_are 1 event=rejected position=reporter reason=missing-parameter
+verify "a parameter the grant does not declare → rejected, unknown-parameter" \
+  wait_for 10 rows_are 1 event=rejected position=reporter reason=unknown-parameter
+verify "a free text on a position with parameters → rejected, text-not-allowed" \
+  wait_for 10 rows_are 1 event=rejected position=reporter reason=text-not-allowed
+verify "a position that is not a child → rejected, not-a-child" wait_for 10 rows_are 1 event=rejected position=root reason=not-a-child
+verify "… none of them launched a session" rows_are 1 event=launching position=reporter
+verify "the human with a parameter on a position without parameters → rejected, unknown-parameter" \
+  bash -c "'$LOOP' spawn lead repo=alpha | grep -q 'unknown-parameter'"
+verify "request spawn exits 1 on a rejection, and says the reason to the session" \
+  grep -q 'exit 1: richiesta r-[0-9a-f]* · spawn reporter repo=delta: rifiutata: value-not-allowed' "$STATE/loop/records/lead-1/output.txt"
+message_for lead lead-1 $'spawn reporter repo=beta\nspawn reporter repo=gamma'
+verify "repo=beta → reporter-2" wait_for 10 rows_are 1 event=spawn session=reporter-2 "parameters={'repo': 'beta'}"
+verify "repo=gamma over the cap of 2 → queued, reason cap, with its parameters" \
+  wait_for 10 rows_are 1 event=queued position=reporter reason=cap "parameters={'repo': 'gamma'}"
+kill_session reporter-1
+verify "reporter-1 closes → the queued spawn runs, with repo=gamma" \
+  wait_for 10 rows_are 1 event=spawn session=reporter-3 "parameters={'repo': 'gamma'}"
+verify "… the request decided as spawned" \
+  bash -c "grep -l '\"outcome\": \"spawned\"' '$STATE'/loop/requests/done/*.json | xargs grep -l '\"gamma\"' | grep -q ."
+verify "a parameter given twice → loop.py spawn exits 2, nothing deposited" \
+  bash -c "'$LOOP' spawn reporter repo=alpha repo=beta; [[ \$? -eq 2 ]]"
+stop_loop
+
 echo "loop: budget"
 new_state budget script
 start_loop
