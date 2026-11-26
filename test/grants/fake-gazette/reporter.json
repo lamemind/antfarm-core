@@ -1,0 +1,13 @@
+{
+  "position": "reporter",
+  "description": "I cronisti della gazzetta col claude finto: un parametro repo da un elenco chiuso, tetto 4.",
+  "parent": "editor",
+  "max_sessions": 4,
+  "budget_tokens": 1000000,
+  "parameters": {"repo": {"description": "Il repo che il cronista legge.", "values": ["factory", "loom-works", "knowledge-series", "antfarm-core"]}},
+  "launch": {
+    "type": "llm",
+    "prompt": "Sessione {session} del claude finto sul repo {repo}: nessun modello la legge.",
+    "allowed_tools": ["Bash({request} *)", "Bash(git -C {state}/repos/{repo} log -20)"]
+  }
+}

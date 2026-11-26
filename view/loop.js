@@ -3,7 +3,8 @@
 // The server sends a `state` message every time the state on disk changes, and `log` messages with
 // the rows of registry/loop.jsonl. The page draws the org chart from the positions of the loop's
 // status, as a tree from the root down: for every position its switch (switches.json), its figures,
-// its live sessions (sessions.json: alive, or launching, each with the operation it is in, if any),
+// the parameters its grant declares, its live sessions (sessions.json: alive, or launching, each with
+// the operation it is in, if any, and the values of its parameters),
 // the messages still in its mailbox (loop/mailboxes/<position>/),
 // and its closed sessions folded. On the side: the interpellations, read only; the requests the
 // loop has not decided; the detail of what is clicked; the log, newest first.
@@ -159,6 +160,9 @@ function sessionItem(session) {
     "data-session": session.id, "data-status": session.status, "data-type": session.type,
     "data-process": session.process, "data-operation": session.operation?.kind,
   }, parts.filter(Boolean).join(" · "));
+  for (const [name, value] of Object.entries(session.parameters || {})) {
+    item.append(" · ", element("span", { class: "parameter", "data-parameter": name, "data-value": value }, `${name}=${value}`));
+  }
   remember("session", session.id, session, item);
   return item;
 }
@@ -215,6 +219,11 @@ function positionCard(state, id, depth) {
     figure("read", String(state.received[id] || 0)),
   );
   if (figures.launch_type) numbers.append(figure("launch", figures.launch_type));
+  for (const [name, definition] of Object.entries(figures.parameters || {})) {
+    const declared = figure(`parameter ${name}`, (definition.values || []).join(" · "));
+    declared.setAttribute("data-declared-parameter", name);
+    numbers.append(declared);
+  }
   card.append(numbers);
 
   card.append(element("h4", {}, "live sessions"), list(live.map(sessionItem), "none"));
@@ -287,8 +296,9 @@ function renderRequests(state) {
   const items = state.requests.map((request) => {
     const outcome = request.launching ? `accepted · ${request.launching.session} launching`
       : request.queued ? `queued · ${request.queued.reason}` : "not yet decided";
+    const asked = [request.position ?? "", ...Object.entries(request.parameters || {}).map(([name, value]) => `${name}=${value}`)].join(" ");
     const item = element("li", { "data-request": request.id, "data-kind": request.kind, "data-queued": request.queued ? request.queued.reason : "" },
-      `${request.kind} ${request.position ?? ""} · from ${request.from} · ${outcome}`);
+      `${request.kind} ${asked} · from ${request.from} · ${outcome}`);
     remember("request", request.id, request, item);
     return item;
   });
@@ -302,7 +312,7 @@ function renderRequests(state) {
 function logItem(row) {
   view.logCounter += 1;
   const words = [row.event, row.position, row.session, row.from && row.from !== row.session ? `from ${row.from}` : null,
-    row.reason, row.read_ts ? `read ${row.read_ts.slice(11, 23)}` : null,
+    ...Object.entries(row.parameters || {}).map(([name, value]) => `${name}=${value}`), row.reason, row.read_ts ? `read ${row.read_ts.slice(11, 23)}` : null,
     row.started_ts ? `started ${row.started_ts.slice(11, 23)}` : null, row.detail].filter(Boolean);
   const item = element("li", { "data-log-row": String(view.logCounter), "data-event": row.event });
   item.append(element("span", { class: "time" }, clock(row.ts)), document.createTextNode(words.join(" · ")));

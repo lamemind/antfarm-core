@@ -38,6 +38,10 @@ the loop or of the view:
 - a slow launch: on a second state root, with a fake `claude` (test/fake-claude.py) that takes
   LAUNCH_S for a launch, the session is in the DOM as launching, with its operation, while the
   registry says launching, and alive once the registry says alive
+- the reporters: on a third state root, with the fake `claude`, the grants of test/grants/fake-gazette
+  — a reporter position with the parameter `repo`, four values, cap 4 —, the human asks four spawns
+  on reporter, one per value; under [data-position="reporter"] the DOM carries one alive session per
+  value, each with its `repo` parameter equal to the registry, and the four values of the grant
 - a real session, only with --real-session: on the LLM fixture, the switch of the root starts a
   Claude Code session on haiku; its prompt asks a spawn on lead, which is off, and the log carries
   the request queued; once the session has ended its turn the test deposits a message for it, the
@@ -77,6 +81,8 @@ VIEW = ANTFARM / "bin" / "loop-view.py"
 GRANTS = ANTFARM / "test" / "grants" / "script"
 FIXTURE_GRANTS = ANTFARM / "test" / "grants" / "fixture"
 FAKE_GRANTS = ANTFARM / "test" / "grants" / "fake"
+GAZETTE_GRANTS = ANTFARM / "test" / "grants" / "fake-gazette"
+REPOS = ("factory", "loom-works", "knowledge-series", "antfarm-core")
 FAKE_CLAUDE = ANTFARM / "test" / "fake-claude.py"
 LAUNCH_S = 5
 CYCLE = "0.2"
@@ -456,6 +462,42 @@ def launching_scenario(page, processes, disk, screenshots):
     same_as_disk(page, disk, "after the launch")
 
 
+def reporters_scenario(page, processes, disk, screenshots):
+    page.goto(processes.address)
+    page.wait_for_selector('body[data-connection="open"][data-loop="running"]', state="attached", timeout=WAIT_MS)
+    print("the reporters, one per repo")
+    page.click('[data-switch="reporter"]')
+    verify("click on the switch of reporter → on in the DOM", switch_settled(page, "reporter", True))
+    declared = page.evaluate("""() => [...document.querySelectorAll('[data-position="reporter"] [data-declared-parameter="repo"] dd')]
+        .map(node => node.textContent)""")
+    verify("the card of reporter shows the four values of its parameter", declared == [" · ".join(REPOS)], f"{declared}")
+    answers = [processes.human("spawn", "reporter", f"repo={repo}") for repo in REPOS]
+    verify("four spawns on reporter, one per repo → accepted",
+           all("in lancio" in answer.stdout or "lanciata" in answer.stdout for answer in answers),
+           " | ".join(answer.stdout.strip() for answer in answers))
+
+    def alive_in_registry():
+        return {entry["parameters"]["repo"]: session_id for session_id, entry in disk.sessions().items()
+                if entry["position"] == "reporter" and entry["status"] == "alive"}
+
+    verify("… four reporter sessions alive in the registry", wait_until(lambda: len(alive_in_registry()) == 4, LAUNCH_S + WAIT_S),
+           f"{alive_in_registry()}")
+    registry = alive_in_registry()
+    selector = '[data-position="reporter"] [data-session][data-status="alive"] [data-parameter="repo"]'
+    verify("… four alive sessions in the DOM under reporter, each with its repo",
+           wait_until(lambda: page.locator(selector).count() == 4), f"{page.locator(selector).count()}")
+    shown = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('[data-position="reporter"] [data-session][data-status="alive"]')]
+        .map(item => [item.querySelector('[data-parameter="repo"]')?.dataset.value, item.dataset.session]))""")
+    verify("… one per repo, the same session the registry carries for that repo", shown == registry,
+           f"DOM {shown} · registry {registry}")
+    verify("… and every repo once", sorted(shown) == sorted(REPOS), f"{sorted(shown)}")
+    rows = page.evaluate("() => [...document.querySelectorAll('#log [data-event=\"spawn\"]')].map(li => li.textContent)")
+    verify("the four spawn rows of the log of the DOM carry their repo",
+           all(any(f"repo={repo}" in row for row in rows) for repo in REPOS), f"{rows}")
+    screenshot(page, screenshots, "reporters")
+    same_as_disk(page, disk, "with the four reporters")
+
+
 def new_state(folder, grants):
     """A state root under the folder with a copy of the grants."""
     state = folder / "state"
@@ -651,6 +693,7 @@ def main():
         neutral_scenario(folder / "neutral", args.neutral_s)
         run_scenario(folder / "script", GRANTS, scenario, args.screenshots, page_errors)
         run_scenario(folder / "fake", FAKE_GRANTS, launching_scenario, args.screenshots, page_errors, fake_claude)
+        run_scenario(folder / "gazette", GAZETTE_GRANTS, reporters_scenario, args.screenshots, page_errors, fake_claude)
         verify("no JavaScript error in the pages", not page_errors, "; ".join(page_errors))
         if args.real_session:
             real_session_scenario(folder / "real")

@@ -168,3 +168,4 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-
   aside { border-left: 0; border-top: 1px solid var(--border); }
   aside > section { max-height: none !important; }
 }
+[data-session] .parameter { font-weight: 600; }

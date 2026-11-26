@@ -77,8 +77,8 @@ VIEW_FILES = {
     "/loop.css": ("loop.css", "text/css; charset=utf-8"),
 }
 SESSION_FIELDS = ("id", "position", "type", "status", "operation", "pid", "starttime", "short_id", "sessionId",
-                  "decided", "launched", "launched_by", "request", "reason", "wakes", "last_wake", "closed",
-                  "close_reason", "cwd")
+                  "decided", "launched", "launched_by", "request", "reason", "parameters", "wakes", "last_wake",
+                  "closed", "close_reason", "cwd")
 
 
 # <editor-fold defaultstate="collapsed" desc="State on disk → one snapshot">
@@ -139,6 +139,7 @@ def snapshot(paths):
         grant = grants.get(position) or {}
         figures["description"] = grant.get("description")
         figures["launch_type"] = (grant.get("launch") or {}).get("type")
+        figures["parameters"] = grant.get("parameters") or {}
     registry = libstate.read_json(paths.sessions, {"sessions": {}})
     return {
         "state_root": str(paths.state),
